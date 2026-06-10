@@ -1,0 +1,11 @@
+PySide6
+numpy
+PyOpenGL
+numpy-stl
+trimesh
+pyglet
+Pillow
+tqdm
+vamtoolbox
+pyinstaller
+flask
