@@ -123,22 +123,39 @@ This is the one thing to get right when running from source. **The released inst
 
 In dev mode the Electron shell (`UIMain/Front_End/electron/main.cjs`) launches the Flask backend using the Python interpreter at **`.venv\Scripts\python.exe` in the Tomo repo root**, and expects `import vamtoolbox` (and `astra`) to work in that environment. So linking Tomo to VAMToolbox means: *create that `.venv` and install VAMToolbox into it.*
 
+**Prerequisites:** Windows 10/11 (64-bit), **Python 3.13**, [Node.js LTS](https://nodejs.org/), and (for GPU voxelization/optimization) an NVIDIA CUDA-capable GPU. `git` is needed if you let the setup script clone VAMToolbox.
+
 **One-command setup (recommended):**
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup_dev.ps1
 ```
-`setup_dev.ps1` creates `.venv` at the repo root, installs VAMToolbox + its ASTRA CUDA backend into it (by delegating to VAMToolbox's own `install.ps1`), adds the backend's web deps (`flask`, `flask-cors`), runs `npm install` for the frontend, and verifies that `import vamtoolbox` works. Point it at a local VAMToolbox checkout with `-VamToolboxPath <path>`, or let it clone VAMToolbox for you. Use `-SkipTorch` for a smaller install.
+`setup_dev.ps1` creates `.venv` at the repo root, installs VAMToolbox + its ASTRA CUDA backend into it (by delegating to VAMToolbox's own `install.ps1`), adds the backend's web deps (`flask`, `flask-cors`), runs `npm install` for the frontend, and verifies that `import vamtoolbox` works. Flags:
 
-**Manual equivalent**, if you'd rather wire it yourself:
+- `-VamToolboxPath <path>` — use a local VAMToolbox checkout instead of cloning (the checkout must contain `install.ps1`, i.e. VAMToolbox 3.0.0+). Without it, VAMToolbox is cloned into `.vamtoolbox-src` at the repo root.
+- `-SkipTorch` — smaller install (`torch` is only needed for the pyTorch ray-tracing / algebraic propagators, not for OSMO/BCLP).
+- `-SkipFrontend` — backend-only setup (skip `npm install`).
+
+**Manual equivalent**, if you'd rather wire it yourself. From the Tomo repo root:
 ```powershell
-# From the Tomo repo root — create the venv where main.cjs expects it
+# 1. Create the venv where main.cjs expects it (Python 3.13)
 python -m venv .venv
 .venv\Scripts\activate
-# Install VAMToolbox (which brings ASTRA + the scientific stack) into this venv.
-# See VAMToolbox's install.ps1 / README for the ASTRA standalone wheel step:
-#   https://github.com/computed-axial-lithography/VAMToolbox
-pip install flask flask-cors          # backend web deps not covered by VAMToolbox
+
+# 2. Install ASTRA (CUDA tomography backend). It is NOT a normal PyPI package on
+#    Windows — download the standalone "Windows 64-bit Python 3.13/CUDA" build from
+#    https://astra-toolbox.com/downloads/ , unpack it, run the bundled
+#    vc_redist.x64.exe, then pip-install the wheel inside:
+pip install astra_toolbox-2.4.1-cp313-cp313-win_amd64.whl
+
+# 3. Install VAMToolbox + the scientific stack, then the backend web deps.
+#    Easiest: run VAMToolbox's installer against THIS venv:
+#       <vamtoolbox checkout>\install.ps1 -VenvPath .venv
+#    Or by hand from a VAMToolbox checkout:
+pip install -r <vamtoolbox>\requirements-py313.txt
+pip install -e <vamtoolbox>          # so `import vamtoolbox` works
+pip install flask flask-cors         # backend web deps not covered by VAMToolbox
 ```
+`import vamtoolbox, astra` should then succeed and `astra.use_cuda()` return `True` on a CUDA GPU. See the [VAMToolbox README](https://github.com/computed-axial-lithography/VAMToolbox) for more on the ASTRA download and install.
 
 ### Run in dev mode
 After linking (above), launch everything with one command:
