@@ -117,19 +117,37 @@ UIMain/
   Python_Backend/   Flask server.py, VAM_Ob.py, optimize_worker.py, voxelize_worker.py
 ```
 
-### Run in dev mode
-```powershell
-# 1. Backend (Flask, binds :5174) — needs VAMToolbox importable on PYTHONPATH
-$env:PYTHONPATH = "<path to your vamtoolbox checkout>"
-python UIMain\Python_Backend\server.py
+### Linking to VAMToolbox
 
-# 2. Frontend + Electron (Vite :5173 + desktop window)
-cd UIMain\Front_End
-npm install
-npm run app
+This is the one thing to get right when running from source. **The released installer already bundles VAMToolbox + ASTRA**, so end users never deal with this — it only matters for development.
+
+In dev mode the Electron shell (`UIMain/Front_End/electron/main.cjs`) launches the Flask backend using the Python interpreter at **`.venv\Scripts\python.exe` in the Tomo repo root**, and expects `import vamtoolbox` (and `astra`) to work in that environment. So linking Tomo to VAMToolbox means: *create that `.venv` and install VAMToolbox into it.*
+
+**One-command setup (recommended):**
+```powershell
+powershell -ExecutionPolicy Bypass -File setup_dev.ps1
+```
+`setup_dev.ps1` creates `.venv` at the repo root, installs VAMToolbox + its ASTRA CUDA backend into it (by delegating to VAMToolbox's own `install.ps1`), adds the backend's web deps (`flask`, `flask-cors`), runs `npm install` for the frontend, and verifies that `import vamtoolbox` works. Point it at a local VAMToolbox checkout with `-VamToolboxPath <path>`, or let it clone VAMToolbox for you. Use `-SkipTorch` for a smaller install.
+
+**Manual equivalent**, if you'd rather wire it yourself:
+```powershell
+# From the Tomo repo root — create the venv where main.cjs expects it
+python -m venv .venv
+.venv\Scripts\activate
+# Install VAMToolbox (which brings ASTRA + the scientific stack) into this venv.
+# See VAMToolbox's install.ps1 / README for the ASTRA standalone wheel step:
+#   https://github.com/computed-axial-lithography/VAMToolbox
+pip install flask flask-cors          # backend web deps not covered by VAMToolbox
 ```
 
-The backend requires VAMToolbox and its dependencies (NumPy, SciPy, **ASTRA with CUDA**, pyglet, trimesh, scikit-image, OpenCV, imageio-ffmpeg) plus `flask` and `flask-cors`. See [VAMToolbox](https://github.com/computed-axial-lithography/VAMToolbox) for environment setup.
+### Run in dev mode
+After linking (above), launch everything with one command:
+```powershell
+cd UIMain\Front_End
+npm run app   # starts Vite (:5173) + the Flask backend (:5174) + the Electron window
+```
+
+The backend requires VAMToolbox and its dependencies (NumPy, SciPy, **ASTRA with CUDA**, pyglet, trimesh, scikit-image, OpenCV, imageio-ffmpeg) plus `flask` and `flask-cors` — all installed by `setup_dev.ps1`.
 
 ### Build the installer
 A one-command build script and full instructions are in [`BUILD.md`](BUILD.md):

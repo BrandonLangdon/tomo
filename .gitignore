@@ -16,6 +16,10 @@ __pycache__/
 UIMain/Python_Backend/logs/
 *.log
 
+# --- Dev environment (created by setup_dev.ps1) ---
+.venv/
+.vamtoolbox-src/
+
 # --- Generated run artifacts (videos / images / sinograms / projects) ---
 run_*.mp4
 run_*.png
