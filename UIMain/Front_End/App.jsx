@@ -1549,11 +1549,18 @@ export default function App() {
                 window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);   // window-level so it never gets stuck
               }}>
               {previewInfo ? (
-                <img src={`${API}/preview_frame/${previewFrame}?t=${videoStamp}`} alt="print preview" draggable={false}
-                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", filter: `brightness(${videoIntensity})`,
+                // Wrapper carries the projector-frame border + zoom/pan; the IMG carries
+                // the brightness filter.  A filter on the child can't tint the parent's
+                // border, so Intensity no longer brightens the dotted frame.  NOTE: the
+                // dotted border is a GUI-only guide — it is NOT part of the exported video.
+                <div style={{ maxWidth: "100%", maxHeight: "100%", display: "inline-flex",
                     transform: `translate(${videoPan.x}px, ${videoPan.y}px) scale(${videoZoom})`, transformOrigin: "center",
                     border: "1px dotted #8a8a96", boxSizing: "border-box",   // projector frame extent (soft dotted grey)
-                    cursor: videoZoom > 1 ? "grab" : "default" }} />
+                    cursor: videoZoom > 1 ? "grab" : "default" }}>
+                  <img src={`${API}/preview_frame/${previewFrame}?t=${videoStamp}`} alt="print preview" draggable={false}
+                    style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block",
+                      filter: `brightness(${videoIntensity})` }} />
+                </div>
               ) : <span style={{ color: C.muted, fontSize: 13 }}>No preview yet — run Optimize first.</span>}
               {previewInfo && (() => { const zb = { width: 20, height: 20, borderRadius: 4, border: `1px solid ${C.border}`, background: C.bgT, color: C.text, cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }; return (
                 <div onMouseDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} style={{ position: "absolute", bottom: 14, left: "50%", transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 9, background: `${C.bgS}f2`, border: `1px solid ${C.border}`, borderRadius: 8, padding: "7px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>

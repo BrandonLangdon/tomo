@@ -487,11 +487,16 @@ class VAM:
         image_seq = vamtb.imagesequence.ImageSeq(
             image_config=iconfig, sinogram=self.sino
         )
-        n = len(image_seq.images)
+        # vamtoolbox's DLP projector path (dlp/players.py) flips every frame
+        # vertically (np.flipud) before projecting, because pyglet textures are
+        # bottom-origin.  The cv2/ffmpeg paths here are top-origin, so without the
+        # same flip the preview/video is upside-down vs what actually gets printed.
+        frames = [np.ascontiguousarray(np.flipud(im)) for im in image_seq.images]
+        n = len(frames)
         # Preview shows exactly ONE rotation (the n sinogram angles) and the
         # frontend loops it; pick an fps that plays a rotation in a few seconds.
         fps = max(12.0, min(30.0, n / 8.0))
-        return image_seq.images, fps
+        return frames, fps
 
     def saveVid(self, out_path: str = None):
         """
@@ -544,7 +549,10 @@ class VAM:
         def _frame(k):
             angle = (k * deg_per_frame) % 360.0
             idx = int(angle / 360.0 * n_images) % n_images
-            g = image_seq.images[idx]
+            # np.flipud to match vamtoolbox's DLP projector (dlp/players.py) — the
+            # bottom-origin pyglet path flips each frame; keep the saved video in the
+            # same orientation as the real print (and as the live preview above).
+            g = np.flipud(image_seq.images[idx])
             return np.repeat(g[:, :, None], 3, axis=2)   # grey -> (H, W, 3) RGB
 
         # Encode through the ffmpeg binary BUNDLED with imageio-ffmpeg.  This is
