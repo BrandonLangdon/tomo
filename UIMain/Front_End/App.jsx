@@ -5,7 +5,10 @@ import VoxelViewer from "./VoxelViewer";
 import MeshViewer from "./MeshViewer";
 import tomoLogo from "./tomoLogo.png";   // black line art — invert(1) to render white on the dark UI
 
-const API = "http://localhost:5174/api";
+// Dev build talks to the dev backend (:5274); the packaged build to :5174. This keeps
+// a running installed Tomo and a dev build from fighting over one port. Kept in sync
+// with electron/main.cjs (BACKEND_PORT) and the backend's TOMO_BACKEND_PORT.
+const API = `http://localhost:${import.meta.env.DEV ? 5274 : 5174}/api`;
 
 // ── Design Palette ────────────────────────────────────────────────────────
 const C = {
@@ -26,7 +29,7 @@ const DEFAULT_VIALS = [
 // A projector = pixel dimensions (W×H, oriented for the vial: H is the tall vial axis) +
 // pixel pitch (µm). Pitch drives the print/voxel resolution; W×H drives the output video.
 const DEFAULT_PROJECTORS = [
-  { id: "opencal2", name: "OpenCAL V2", pxW: 1080, pxH: 1920, pitchUm: 90, telecentric: true, throwRatio: 1.5 },
+  { id: "opencal2", name: "OpenCAL V2", pxW: 1080, pxH: 1920, pitchUm: 79.7, telecentric: true, throwRatio: 1.5 },
 ];
 
 // ── Core UI Primitives ────────────────────────────────────────────────────
@@ -39,7 +42,23 @@ function Btn({ children, onClick, disabled, variant = "default", style }) {
 function Pill({ label, value }) { return <div style={{ background: C.bgT, borderRadius: 4, padding: "5px 9px", display: "flex", flexDirection: "column", gap: 1 }}><span style={{ fontSize: 11, color: C.muted }}>{label}</span><span style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{value}</span></div>; }
 function Bar({ pct }) { return <div style={{ height: 3, background: C.bgT, borderRadius: 2, overflow: "hidden", marginTop: 5 }}><div style={{ width: `${pct}%`, height: "100%", background: C.blue, transition: "width .3s" }} /></div>; }
 function Slider({ label, min, max, step, value, onChange, unit = "" }) { return <div><div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}><Lbl>{label}</Lbl><span style={{ fontSize: 11, fontWeight: 700, color: C.text }}>{value}{unit}</span></div><input type="range" min={min} max={max} step={step} value={value} onChange={e => onChange(parseFloat(e.target.value))} style={{ width: "100%" }} /></div>; }
-function NumInput({ value, onChange, style, step = "any" }) { return <input type="number" step={step} value={isNaN(value) ? "" : value} onChange={e => { const v = parseFloat(e.target.value); onChange(isNaN(v) ? 0 : v); }} style={{ width: "100%", background: "#16161f", color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 6px", fontSize: 11, fontFamily: "monospace", outline: "none", ...style }} />; }
+function NumInput({ value, onChange, style, step = "any" }) {
+  // `text` is non-null only while the user is editing, so the field can be empty
+  // or partial ("", "12.", "-") without snapping back to the committed value.
+  const [text, setText] = useState(null);
+  const display = text != null ? text : (isNaN(value) ? "" : String(value));
+  return <input type="text" inputMode="decimal" value={display}
+    onFocus={e => e.target.select()}                        // select all so typing (incl. a leading "-") replaces cleanly
+    onChange={e => {
+      const s = e.target.value;
+      if (s !== "" && !/^-?\d*\.?\d*$/.test(s)) return;     // ignore non-numeric keystrokes
+      setText(s);
+      const v = parseFloat(s);
+      if (s !== "" && !isNaN(v)) onChange(v);               // push only valid numbers; empty/partial leaves the value untouched so you can clear & retype
+    }}
+    onBlur={() => setText(null)}                            // stop overriding -> snap back to the committed (clamped) value
+    style={{ width: "100%", background: "#16161f", color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 6px", fontSize: 11, fontFamily: "monospace", outline: "none", ...style }} />;
+}
 // Text-based numeric input that allows a leading "-" and partial decimals while typing
 // (type=number swallows the "-").  Used where negatives are valid, e.g. reverse rotation.
 function SignedNumInput({ value, onChange, style }) {
@@ -47,7 +66,7 @@ function SignedNumInput({ value, onChange, style }) {
   const focused = useRef(false);
   useEffect(() => { if (!focused.current) setTxt(isNaN(value) ? "" : String(value)); }, [value]);
   return <input type="text" inputMode="decimal" value={txt}
-    onFocus={() => { focused.current = true; }}
+    onFocus={e => { focused.current = true; e.target.select(); }}
     onChange={e => { const t = e.target.value; if (t === "" || t === "-" || /^-?\d*\.?\d*$/.test(t)) { setTxt(t); const v = parseFloat(t); if (!isNaN(v)) onChange(v); } }}
     onBlur={() => { focused.current = false; const v = parseFloat(txt); onChange(isNaN(v) ? 0 : v); setTxt(isNaN(v) ? "" : String(v)); }}
     style={{ width: "100%", background: "#16161f", color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "3px 6px", fontSize: 11, fontFamily: "monospace", outline: "none", ...style }} />;
@@ -132,10 +151,10 @@ export default function App() {
   const voxCancelRef = useRef(false);
   const [activeTool, setActiveTool] = useState("none");
 
-  const [resolution, setResolution] = useState(0.09);  // OpenCAL V2 default (90 µm) — EFFECTIVE pitch
-  const [basePitch, setBasePitch] = useState(0.09);    // projector native pitch (scale 1.0 reference)
+  const [resolution, setResolution] = useState(0.0797);  // OpenCAL V2 default (79.7 µm) — EFFECTIVE pitch
+  const [basePitch, setBasePitch] = useState(0.0797);    // projector native pitch (scale 1.0 reference)
   const [voxScale, setVoxScale] = useState(1.0);       // resolution scale (<1 = coarser/faster); pitch = base/scale
-  const [voxMeshRes, setVoxMeshRes] = useState(0.09);  // pitch the DISPLAYED voxel mesh was built at (stable while the slider moves)
+  const [voxMeshRes, setVoxMeshRes] = useState(0.0797);  // pitch the DISPLAYED voxel mesh was built at (stable while the slider moves)
   const [fullResMesh, setFullResMesh] = useState(false);  // render the voxel preview at full resolution (slow for big grids)
   const [meshInfo, setMeshInfo] = useState(null);         // {display_dim, full_grid, step}
   const [voxStatus, setVoxStatus] = useState("idle");
@@ -169,7 +188,7 @@ export default function App() {
   // Materials: named bundles of optics/chemistry that drive the run — refractive
   // index (vial correction), absorption, diffusion.  Choose one, edit it, add new.
   const [materials, setMaterials] = useState([
-    { id: "default", name: "Default resin", index: 1.51, absorption: false, absorptionCoeff: 0.33, diffusion: false, diffusionCoeff: 1e-4 },
+    { id: "default", name: "OpenCAL resin", index: 1.51, absorption: false, absorptionCoeff: 0.207, diffusion: false, diffusionCoeff: 1e-4 },
   ]);
   const [materialId, setMaterialId] = useState("default");
   const activeMaterial = materials.find(m => m.id === materialId) || materials[0];
@@ -229,6 +248,11 @@ export default function App() {
   // Video playback state
   const [videoStamp, setVideoStamp] = useState(Date.now());
   const [previewInfo, setPreviewInfo]   = useState(null);  // { frame_count, fps }
+  const [showVialFrame, setShowVialFrame] = useState(false);  // Preview overlay: vial bore outline mapped onto the projection (off by default)
+  const [zOffsetOn, setZOffsetOn] = useState(false);   // vertical (Z) projection offset control — off by default
+  const [zOffsetMm, setZOffsetMm] = useState(0);       // vertical offset of the projection, mm
+  const [zOffsetLoading, setZOffsetLoading] = useState(false);   // overlay shown only when a regen is slow (>2s)
+  const zOffsetTimer = useRef(null);
   const [previewFrame, setPreviewFrame] = useState(0);
   const [videoIntensity, setVideoIntensity] = useState(1);   // display + saved brightness scale
   const [videoZoom, setVideoZoom] = useState(1);             // preview zoom
@@ -297,6 +321,7 @@ export default function App() {
     if (s.vial) setVial(s.vial);
     if (s.cylinder) setCylinder(s.cylinder);
     if (typeof s.showVial === "boolean") setShowVial(s.showVial);
+    if (typeof s.showVialFrame === "boolean") setShowVialFrame(s.showVialFrame);
     if (s.projector) setProjector(s.projector);
     if (s.basePitch != null) setBasePitch(s.basePitch);
     if (s.resolution != null) setResolution(s.resolution);
@@ -320,7 +345,7 @@ export default function App() {
     if (s.verboseOpt != null) setVerboseOpt(s.verboseOpt);
   }
   function collectSettings() {
-    return { materials, materialId, projectors, projector, vials, vial, cylinder, showVial, basePitch, resolution,
+    return { materials, materialId, projectors, projector, vials, vial, cylinder, showVial, showVialFrame, basePitch, resolution,
       videoRpm, videoDurMin, framesPerDeg, videoCodec,
       method, nIter, dH, dL, learningRate, bclpEps, bclpWeight,
       absorption, diffusion, slab, fanBeam, autoScaleSuggest, verboseOpt };
@@ -333,7 +358,7 @@ export default function App() {
   useEffect(() => {
     if (!settingsLoaded.current) return;
     try { localStorage.setItem("tomo_settings", JSON.stringify(collectSettings())); } catch (e) { /* quota/private */ }
-  }, [materials, materialId, projectors, projector, vials, vial, cylinder, showVial, basePitch, resolution, videoRpm, videoDurMin, framesPerDeg, videoCodec, method, nIter, dH, dL, learningRate, bclpEps, bclpWeight, absorption, diffusion, slab, fanBeam, autoScaleSuggest, verboseOpt]);
+  }, [materials, materialId, projectors, projector, vials, vial, cylinder, showVial, showVialFrame, basePitch, resolution, videoRpm, videoDurMin, framesPerDeg, videoCodec, method, nIter, dH, dL, learningRate, bclpEps, bclpWeight, absorption, diffusion, slab, fanBeam, autoScaleSuggest, verboseOpt]);
   const RESIN_RI = activeMaterial?.index || 1.51;  // resin refractive index (from the active material)
   // Usable print radius: refraction at the curved vial wall limits reach to ~vial_radius / n
   const printRadius = fanBeam ? cylinder.radius / RESIN_RI : cylinder.radius;
@@ -661,22 +686,26 @@ export default function App() {
         // finishing.  Wait for it to exit, then start FRESH with the current settings
         // (don't track the old job — that's what looked like it "resumed").
         setVoxStage("Finishing previous voxelize…"); setVoxProgress(0); setVoxGrid(null);
+        let fails = 0;
         const iv = setInterval(async () => {
           if (voxCancelRef.current) { clearInterval(iv); return; }
           try {
             const p = await fetch(`${API}/poll`).then(r => r.json());
+            fails = 0;
             if (!p.vox_running) { clearInterval(iv); startVoxelize(); }   // free now — restart with new settings
-          } catch { clearInterval(iv); setVoxStatus("error"); setVoxError("Lost connection to backend"); }
+          } catch { if (++fails >= 4) { clearInterval(iv); setVoxStatus("error"); setVoxError("Lost connection to backend"); } }
         }, 500);
       } else { setVoxStatus("error"); setVoxError(d.message || `Voxelize failed (${d.status || "unknown"})`); }
     } catch (e) { if (!voxCancelRef.current) { setVoxStatus("error"); setVoxError(String(e)); } }
   }
 
   function pollVoxelize() {
+    let fails = 0;   // tolerate transient poll failures (e.g. a wifi/network-stack blip) — only give up after several in a row
     const iv = setInterval(async () => {
       if (voxCancelRef.current) { clearInterval(iv); return; }
       try {
         const d = await fetch(`${API}/poll`).then(r => r.json());
+        fails = 0;
         // Voxelize fills the first 85% of the bar; the preview-mesh build fills 85–100%.
         setVoxProgress((d.vox_progress || 0) * 0.85);
         setVoxStage(d.vox_stage || "Voxelizing");
@@ -689,7 +718,7 @@ export default function App() {
           clearInterval(iv); setVoxInfo(d.voxel_info);
           runMeshingPhase(d.voxel_info);
         }
-      } catch { clearInterval(iv); setVoxStatus("error"); setVoxError("Lost connection to backend"); }
+      } catch { if (++fails >= 4) { clearInterval(iv); setVoxStatus("error"); setVoxError("Lost connection to backend"); } }
     }, 400);
   }
 
@@ -780,9 +809,11 @@ export default function App() {
   }
 
   function pollSlice() {
+    let fails = 0;   // tolerate transient poll failures (e.g. a wifi/network-stack blip) before giving up
     const iv = setInterval(async () => {
       try {
         const d = await fetch(`${API}/poll`).then(r => r.json());
+        fails = 0;
         setSliceProgress(d.slice_progress || 0);
         setSliceStage(d.slice_stage || "");
         if (Array.isArray(d.slice_loss) && d.slice_loss.length) setLossHistory(d.slice_loss);
@@ -803,7 +834,7 @@ export default function App() {
         }
         else if (d.slice_error) { clearInterval(iv); setSliceStatus("error"); }
         else if (!d.slice_running) { clearInterval(iv); setSliceStatus("idle"); setSliceStage(""); setSliceProgress(0); }  // cancelled / stopped
-      } catch { clearInterval(iv); setSliceStatus("error"); }
+      } catch { if (++fails >= 4) { clearInterval(iv); setSliceStatus("error"); } }
     }, 400);
   }
 
@@ -883,6 +914,37 @@ export default function App() {
       a.href = url; a.download = `${ts}-tomolog.log`; a.click();   // e.g. 20260609-153720-tomolog.log
       URL.revokeObjectURL(url);
     } catch (e) { console.error("export log failed", e); }
+  }
+
+  async function handleSaveVerbose() {
+    try {
+      const res = await fetch(`${API}/download_verbose`, { method: "POST" });
+      if (!res.ok) { alert("No verbose figure to save — run an optimize with Verbose enabled."); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = "Tomo_convergence.png"; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) { console.error("save verbose failed", e); }
+  }
+
+  // Vertical (Z) projection offset: update the value live, debounce the backend
+  // regenerate (which rebuilds the preview frames + the eventual saved video).
+  function applyZOffset(mm) {
+    setZOffsetMm(mm);
+    if (zOffsetTimer.current) clearTimeout(zOffsetTimer.current);
+    zOffsetTimer.current = setTimeout(async () => {
+      // Show a loading overlay ONLY if the regenerate is slow (>2s) — quick moves don't flash it.
+      const slow = setTimeout(() => setZOffsetLoading(true), 2000);
+      try {
+        const r = await fetch(`${API}/update_video_config`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ v_offset_mm: mm }),
+        });
+        if (r.ok) setVideoStamp(Date.now());   // frames regenerated — refresh the preview
+      } catch (e) { console.error("z-offset update failed", e); }
+      finally { clearTimeout(slow); setZOffsetLoading(false); }
+    }, 250);
   }
 
   function handleExportSettings() {
@@ -1548,20 +1610,67 @@ export default function App() {
                 const up = () => { window.removeEventListener("mousemove", move); window.removeEventListener("mouseup", up); };
                 window.addEventListener("mousemove", move); window.addEventListener("mouseup", up);   // window-level so it never gets stuck
               }}>
+              {zOffsetLoading && (
+                <div style={{ position: "absolute", inset: 0, zIndex: 6, display: "flex", alignItems: "center", justifyContent: "center",
+                  background: "rgba(10,10,16,0.55)", pointerEvents: "none" }}>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 9 }}>
+                    <div style={{ width: 28, height: 28, border: `3px solid ${C.border}`, borderTopColor: C.blue, borderRadius: "50%", animation: "tomospin 0.8s linear infinite" }} />
+                    <span style={{ fontSize: 12, color: C.text }}>Updating projection…</span>
+                  </div>
+                </div>
+              )}
               {previewInfo ? (
                 // Wrapper carries the projector-frame border + zoom/pan; the IMG carries
                 // the brightness filter.  A filter on the child can't tint the parent's
                 // border, so Intensity no longer brightens the dotted frame.  NOTE: the
                 // dotted border is a GUI-only guide — it is NOT part of the exported video.
-                <div style={{ maxWidth: "100%", maxHeight: "100%", display: "inline-flex",
+                // Size the frame to the projector's real aspect (pxW:pxH, e.g. 1080:1920),
+                // capped to the container. Using aspectRatio (not a shrink-wrapped image)
+                // keeps the box constrained by a definite-size ancestor, so the dotted
+                // border stays tight to the video and the vial overlay % map correctly.
+                <div style={{ position: "relative", aspectRatio: `${activeProjector.pxW} / ${activeProjector.pxH}`,
+                    maxWidth: "100%", maxHeight: "100%",
                     transform: `translate(${videoPan.x}px, ${videoPan.y}px) scale(${videoZoom})`, transformOrigin: "center",
-                    border: "1px dotted #8a8a96", boxSizing: "border-box",   // projector frame extent (soft dotted grey)
+                    border: "1px dotted #8a8a96", boxSizing: "border-box",   // projector frame extent — tight around the video
                     cursor: videoZoom > 1 ? "grab" : "default" }}>
                   <img src={`${API}/preview_frame/${previewFrame}?t=${videoStamp}`} alt="print preview" draggable={false}
-                    style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block",
+                    style={{ width: "100%", height: "100%", objectFit: "contain", display: "block",
                       filter: `brightness(${videoIntensity})` }} />
+                  {showVialFrame && (() => {
+                    // Map the vial bore onto the projection frame.  The frame spans
+                    // pxW*pitch (mm) wide × pxH*pitch (mm) tall (same mm/px on both axes),
+                    // so the bore is (Ø / fovW) of the width and (height / fovH) of the height.
+                    const fovW = activeProjector.pxW * activeProjector.pitchUm / 1000;
+                    const fovH = activeProjector.pxH * activeProjector.pitchUm / 1000;
+                    const w = fovW > 0 ? (cylinder.radius * 2) / fovW : 0;
+                    const h = fovH > 0 ? cylinder.height / fovH : 0;
+                    return <div style={{ position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)",
+                      width: `${w * 100}%`, height: `${h * 100}%`, border: "1.5px dashed #38bdf8",
+                      boxShadow: "0 0 0 1px rgba(0,0,0,0.55)", pointerEvents: "none", boxSizing: "border-box" }}>
+                      <span style={{ position: "absolute", top: -15, left: 0, fontSize: 10, fontWeight: 600, color: "#7dd3fc", whiteSpace: "nowrap", textShadow: "0 1px 2px #000" }}>
+                        vial Ø{(cylinder.radius * 2).toFixed(0)} × {cylinder.height.toFixed(0)} mm
+                      </span>
+                    </div>;
+                  })()}
                 </div>
               ) : <span style={{ color: C.muted, fontSize: 13 }}>No preview yet — run Optimize first.</span>}
+              {previewInfo && (
+                <div onMouseDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()}
+                  style={{ position: "absolute", bottom: 14, left: 14, display: "flex", flexDirection: "column", gap: 8,
+                    background: `${C.bgS}f2`, border: `1px solid ${C.border}`, borderRadius: 8, padding: "8px 11px",
+                    boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
+                  <Toggle value={showVialFrame} onChange={setShowVialFrame} label="Vial outline" />
+                  <Toggle value={zOffsetOn} onChange={(v) => { setZOffsetOn(v); if (!v) applyZOffset(0); }} label="Z offset" />
+                  {zOffsetOn && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                      <input type="range" min={-80} max={80} step={0.5} value={zOffsetMm}
+                        onChange={e => applyZOffset(parseFloat(e.target.value))} style={{ width: 120 }} />
+                      <SignedNumInput value={zOffsetMm} onChange={applyZOffset} style={{ width: 52, padding: "2px 4px" }} />
+                      <span style={{ fontSize: 11, color: C.muted }}>mm</span>
+                    </div>
+                  )}
+                </div>
+              )}
               {previewInfo && (() => { const zb = { width: 20, height: 20, borderRadius: 4, border: `1px solid ${C.border}`, background: C.bgT, color: C.text, cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }; return (
                 <div onMouseDown={e => e.stopPropagation()} onWheel={e => e.stopPropagation()} style={{ position: "absolute", bottom: 14, left: "50%", transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 9, background: `${C.bgS}f2`, border: `1px solid ${C.border}`, borderRadius: 8, padding: "7px 12px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
                   <span style={{ fontSize: 11, color: C.muted }}>Intensity</span>
@@ -1597,6 +1706,17 @@ export default function App() {
                   <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Reconstruction (predicted dose · mid-slice)</div>
                   <img src={`${API}/recon_slice?t=${videoStamp}`} alt="reconstruction" style={{ width: "100%", borderRadius: 4, border: `1px solid ${C.border}` }} onError={e => { e.target.style.display = "none"; }} />
                 </div>
+                {verboseOpt && verboseFrameOk && (
+                  <div style={{ marginBottom: 12 }}>
+                    <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Optimization convergence (verbose)</div>
+                    <img src={`${API}/verbose_frame?t=${verboseStamp}`} alt="optimization convergence" title="Click to open full size"
+                      style={{ width: "100%", borderRadius: 4, border: `1px solid ${C.border}`, cursor: "zoom-in" }}
+                      onLoad={() => setVerboseFrameOk(true)}
+                      onClick={() => window.open(`${API}/verbose_frame?t=${verboseStamp}`, "_blank")}
+                      onError={() => setVerboseFrameOk(false)} />
+                    <Btn onClick={handleSaveVerbose} style={{ width: "100%", marginTop: 6 }}>⤓ Save image</Btn>
+                  </div>
+                )}
                 {[
                   ["Final dose error", sliceInfo.dose.dose_error != null ? Number(sliceInfo.dose.dose_error).toFixed(4) : "—", C.text, "pqerr", "The optimizer's final loss — how far the predicted dose is from the in/out targets. Lower is better. Good: small and trended down each iteration. Bad: stuck high or rising (add iterations / adjust d_h–d_l)."],
                   ["Voxel error", `${sliceInfo.dose.ver_pct.toFixed(2)}%`, sliceInfo.dose.ver_pct > 10 ? "#f0b84a" : sliceInfo.dose.ver_pct < 1 ? C.green : C.text, "pqver", "Share of voxels on the wrong side of the gel threshold — in-part under-cured (missing features) OR out-of-part over-cured (stray curing). Good: low. Above 10% (yellow) is a significant amount of wrong-dosed material."],

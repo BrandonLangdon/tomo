@@ -1,4 +1,6 @@
-const BASE = "http://localhost:5174/api";
+// Dev build -> dev backend (:5274); packaged -> :5174. Kept in sync with App.jsx and
+// electron/main.cjs so a dev build never collides with an installed Tomo on one port.
+const BASE = `http://localhost:${import.meta.env.DEV ? 5274 : 5174}/api`;
 
 /**
  * Open a native file-dialog and return mesh data from the backend.

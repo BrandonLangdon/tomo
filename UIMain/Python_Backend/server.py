@@ -335,6 +335,10 @@ def start_voxelize():
         return jsonify({"status": "error", "message": "No files loaded"}), 400
     if vox_running:
         return jsonify({"status": "busy"}), 409
+    if slice_running:
+        # Serialize GPU work: a voxelize (OpenGL) + an optimize (CUDA) running at once
+        # can exhaust GPU memory / trip a driver reset and crash the backend.
+        return jsonify({"status": "busy", "message": "An optimization is still running. Wait for it to finish before voxelizing — running both on the GPU at once can crash."}), 409
 
     try:
         data = request.get_json(silent=True) or {}
@@ -664,6 +668,9 @@ def start_slice():
         return jsonify({"status": "error", "message": "Voxelize first"}), 400
     if slice_running:
         return jsonify({"status": "busy"}), 409
+    if vox_running:
+        # Serialize GPU work (see start_voxelize): concurrent CUDA + OpenGL can crash.
+        return jsonify({"status": "busy", "message": "A voxelization is still running. Wait for it to finish before optimizing — running both on the GPU at once can crash."}), 409
     data = request.get_json(silent=True) or {}
     vam.n_iter = int(data.get("n_iter", 5))
     vam.d_h = float(data.get("d_h", 0.6))
@@ -1167,6 +1174,7 @@ def update_video_config():
     # Add these two lines:
     vam.proj_px_w = int(data.get("proj_px_w", vam.proj_px_w))
     vam.proj_px_h = int(data.get("proj_px_h", vam.proj_px_h))
+    vam.video_v_offset_mm = float(data.get("v_offset_mm", vam.video_v_offset_mm))   # GUI vertical (Z) projection offset
 
     try:
         # Regenerate the preview cache with the new true_scale and fps
@@ -1276,6 +1284,21 @@ def verbose_frame():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.post("/api/download_verbose")
+def download_verbose():
+    """The final verbose optimization figure (EvolvingPlot) as a downloadable PNG."""
+    try:
+        d = os.path.join(tempfile.gettempdir(), "tomo_verbose")
+        pngs = _glob.glob(os.path.join(d, "*.png")) if os.path.isdir(d) else []
+        if not pngs:
+            return jsonify({"status": "error", "message": "No verbose figure — run an optimize with Verbose enabled first."}), 404
+        return send_file(max(pngs, key=os.path.getmtime), mimetype="image/png",
+                         as_attachment=True, download_name="Tomo_convergence.png", max_age=0)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.post("/api/download_mp4")
 def download_mp4():
     """Encode (if needed) and serve the full-length MP4.  Encoding is deferred to the
@@ -1311,4 +1334,6 @@ def handle_exception(e):
     }), code
 
 if __name__ == "__main__":
-    app.run(host="localhost", port=5174, debug=False, threaded=True)
+    # Port is env-driven so a dev build (:5274) never collides with an installed
+    # Tomo (:5174) on the same machine.  Electron passes TOMO_BACKEND_PORT.
+    app.run(host="localhost", port=int(os.environ.get("TOMO_BACKEND_PORT", "5174")), debug=False, threaded=True)

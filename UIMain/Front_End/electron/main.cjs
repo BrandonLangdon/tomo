@@ -32,7 +32,10 @@ if (app.isPackaged) {
 }
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL || "http://localhost:5173";
-const BACKEND_PING = "http://localhost:5174/api/poll";
+// Dev and packaged builds use DIFFERENT backend ports so a running installed Tomo
+// (always :5174) never collides with a dev build (always :5274) on the same machine.
+const BACKEND_PORT = app.isPackaged ? 5174 : 5274;
+const BACKEND_PING = `http://localhost:${BACKEND_PORT}/api/poll`;
 const DIST_INDEX = path.join(__dirname, "..", "dist", "index.html");
 
 let backendProc = null;
@@ -71,7 +74,7 @@ function startBackend() {
   try {
     backendProc = spawn(PY_EXE, [SERVER], {
       cwd: BACKEND_DIR,
-      env: { ...process.env, PYTHONPATH: PY_SITE, PYTHONUNBUFFERED: "1" },
+      env: { ...process.env, PYTHONPATH: PY_SITE, PYTHONUNBUFFERED: "1", TOMO_BACKEND_PORT: String(BACKEND_PORT) },
     });
   } catch (e) { dbg("spawn THREW: " + e.message); return; }
   backendProc.on("error", (e) => dbg("backend proc ERROR: " + e.message));
@@ -117,8 +120,8 @@ app.whenReady().then(async () => {
   createWindow();                    // show the window IMMEDIATELY (no ~20-30s blank wait)
   dbg("window created");
   if (await pingBackend()) {
-    dbg("reusing existing backend on :5174");
-    console.log("[electron] reusing backend already running on :5174");
+    dbg(`reusing existing backend on :${BACKEND_PORT}`);
+    console.log(`[electron] reusing backend already running on :${BACKEND_PORT}`);
   } else {
     dbg("no backend; starting it");
     startBackend();

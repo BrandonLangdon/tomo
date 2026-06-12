@@ -26,7 +26,7 @@ export default function MeshViewer({ vertices, normals, indices, cylinder, resol
     if (!el || !vertices || vertices.length === 0) return;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));   // cap: hi-DPI full ratio makes huge buffers that thrash/flicker on resize
     renderer.setSize(el.clientWidth, el.clientHeight);
     el.appendChild(renderer.domElement);
 
@@ -154,19 +154,23 @@ export default function MeshViewer({ vertices, normals, indices, cylinder, resol
     el.addEventListener("contextmenu", e => e.preventDefault());
 
     let raf;
+    // Coalesce resize: ResizeObserver fires many times during a window drag; applying
+    // setSize on every tick reallocates the GL buffer repeatedly -> red/flicker. Instead
+    // flag it and resize ONCE per frame, right before rendering (buffer never shown mid-realloc).
+    let needsResize = true;
     function animate() {
       raf = requestAnimationFrame(animate);
+      if (needsResize) {
+        needsResize = false;
+        const w = el.clientWidth, h = el.clientHeight;
+        if (w && h) { camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); }
+      }
       renderer.render(scene, camera);
       gizmo.render(renderer, camera, orbitTarget, el);
     }
     animate();
 
-    const ro = new ResizeObserver(() => {
-      if (!el.clientWidth || !el.clientHeight) return;
-      camera.aspect = el.clientWidth / el.clientHeight;
-      camera.updateProjectionMatrix();
-      renderer.setSize(el.clientWidth, el.clientHeight);
-    });
+    const ro = new ResizeObserver(() => { needsResize = true; });
     ro.observe(el);
 
     return () => {

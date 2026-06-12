@@ -59,6 +59,7 @@ class VAM:
         self.video_duration_s = 300.0   # total print/video length (~5 min)
         self.video_codec      = "h265"  # "h265" | "mp4v"
         self.video_intensity  = 1.0     # projected-pattern brightness scale (GUI intensity control)
+        self.video_v_offset_mm = 0.0    # vertical (Z) shift of the projection in the frame, mm (GUI control)
 
         # Full 4x4 column-major matrix from Three.js (flat list of 16 floats).
         # None = identity = use STL as-is.
@@ -463,6 +464,19 @@ class VAM:
             return fit
         return true_scale
 
+    def _v_offset_px(self, true_scale):
+        """Vertical (Z) projection offset in projector pixels, from video_v_offset_mm.
+        +mm moves the part UP in the displayed (np.flipud'd) frame, so the sign is
+        negated for ImageConfig.  Clamped so the sinogram stays inside the projector
+        canvas — otherwise vamtoolbox's _insertImage raises 'extends out of screen'."""
+        if self.sino is None:
+            return 0
+        mm_per_px = self.proj_width / max(self.proj_px_w, 1)
+        off_px = -(float(getattr(self, "video_v_offset_mm", 0.0)) / max(mm_per_px, 1e-9))
+        s_v = self.sino.array.shape[2] * true_scale            # part height in projector px
+        max_off = max(0.0, (int(self.proj_px_h) - s_v) / 2.0 - 1)
+        return int(round(max(-max_off, min(max_off, off_px))))
+
     def get_preview_frames(self):
         """
         Return the sinogram rendered as a list of (H, W) uint8 numpy arrays
@@ -479,9 +493,10 @@ class VAM:
         true_scale = self._video_scale()
         
         iconfig = vamtb.imagesequence.ImageConfig(
-            image_dims=(int(self.proj_px_w), int(self.proj_px_h)), 
+            image_dims=(int(self.proj_px_w), int(self.proj_px_h)),
             rotated_angle=0,
             size_scale=true_scale,
+            v_offset=self._v_offset_px(true_scale),   # GUI vertical (Z) projection offset
             normalization_percentile=99.9,
         )
         image_seq = vamtb.imagesequence.ImageSeq(
@@ -519,9 +534,10 @@ class VAM:
         true_scale = self._video_scale()
 
         iconfig = vamtb.imagesequence.ImageConfig(
-            image_dims=(int(self.proj_px_w), int(self.proj_px_h)), 
+            image_dims=(int(self.proj_px_w), int(self.proj_px_h)),
             rotated_angle=0,
             size_scale=true_scale,
+            v_offset=self._v_offset_px(true_scale),   # GUI vertical (Z) projection offset
             normalization_percentile=99.9,
             intensity_scale=float(getattr(self, "video_intensity", 1.0)),  # vamtoolbox-native intensity gain
         )
