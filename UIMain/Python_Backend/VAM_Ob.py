@@ -313,10 +313,31 @@ class VAM:
         self.dose_metrics = self._compute_dose_metrics()
         if self.dose_metrics:
             m = self.dose_metrics
-            print(f"[VAM] Dose quality — in-part min {m['in_min']:.2f} / out-part max {m['out_max']:.2f} "
+            _eff = " [effective post-diffusion dose]" if m.get("effective") else ""
+            print(f"[VAM] Dose quality{_eff} — in-part min {m['in_min']:.2f} / out-part max {m['out_max']:.2f} "
                   f"| process window {m['window']:+.2f} | voxel error {m['ver_pct']:.2f}% "
                   f"(in under {m['in_under_pct']:.2f}%, out over {m['out_over_pct']:.2f}%)")
         print("[VAM] Slicing complete")
+
+    def _effective_dose(self, r, tg, target_voxels=64_000_000):
+        """Effective CURED dose = recon convolved with the diffusion PSF (the projected
+        dose, spread by diffusion, is what crosses the gel threshold).  Both the recon
+        and the binary target are downsampled (stride) so the metric stays cheap, and
+        the PSF is rebuilt at the coarser pitch to match.  Returns (effective_dose,
+        downsampled_binary_target)."""
+        import vamtoolbox as _vamtb
+        nvox = int(r.size)
+        stride = 1
+        while nvox // (stride ** 3) > target_voxels:
+            stride += 1
+        rd = np.ascontiguousarray(r[::stride, ::stride, ::stride]) if stride > 1 else r
+        tgd = tg[::stride, ::stride, ::stride] if stride > 1 else tg
+        pitch = float(self.res) * stride
+        dker = _vamtb.response.blur_ker(
+            pitch, self.diffusion_coeff, self.print_time_s, self.rotation_deg_s,
+            optical=getattr(self, "diffusion_optical", False))
+        eff = _vamtb.response._diffusion_convolve(rd, dker)
+        return np.asarray(eff, dtype=np.float32), tgd
 
     def _compute_dose_metrics(self):
         """In-part vs out-of-part dose quality of the optimized reconstruction.
@@ -328,9 +349,21 @@ class VAM:
                 return None
             # self.recon may be a geometry.Reconstruction wrapper — unwrap to its array
             r = np.asarray(getattr(self.recon, "array", self.recon), dtype=np.float32)
+            tg = np.asarray(self.t_geo.array)
+            # Diffusion-aware: with diffusion correction the PROJECTED dose (recon) is
+            # intentionally non-uniform (fine features boosted), so judging it against a
+            # uniform binary expectation is wrong.  What actually CURES is the recon
+            # convolved with the diffusion PSF — measure THAT effective dose so in-part
+            # uniformity / process window are physically meaningful.
+            self._dose_is_effective = False
+            if getattr(self, "diffusion", False):
+                try:
+                    r, tg = self._effective_dose(r, tg)
+                    self._dose_is_effective = True
+                except Exception as _e:
+                    print(f"[VAM] effective-dose metric unavailable ({_e}); using raw recon")
             rmax = float(r.max()) or 1.0
             r = r / rmax                                   # normalized dose [0,1]
-            tg = np.asarray(self.t_geo.array)
             tgt = tg > (0.5 * float(tg.max()) if tg.max() > 0 else 0.5)
             nX, nY = r.shape[0], r.shape[1]
             yy, xx = np.ogrid[:nX, :nY]
@@ -361,6 +394,7 @@ class VAM:
                 "dose_error": getattr(getattr(self, "_pipe", None), "final_loss", None),  # final optimizer dose error
                 "in_hist": in_h.tolist(), "out_hist": out_h.tolist(),       # dose histograms (fraction per bin)
                 "hist_edges": edges.tolist(), "threshold": T,
+                "effective": bool(getattr(self, "_dose_is_effective", False)),  # metric on post-diffusion dose
             }
         except Exception as e:
             print(f"[VAM] dose-metric computation failed: {e}")
@@ -376,15 +410,19 @@ class VAM:
 
         if self.t_geo is None:
             return {"vertices": [], "normals": [], "indices": [], "gl_scale": 1.0}
-        vol = np.ascontiguousarray(self.t_geo.array).astype(np.float32)
-        # Decimate for display speed.  Bound BOTH by a linear cap (max_dim) AND a
-        # voxel budget, so a mid-size grid (e.g. 752³) can't slip through with step=1
-        # and run marching-cubes on hundreds of millions of voxels.
+        # Decimate FIRST on the raw (uint8) grid, THEN cast only the small result to
+        # float32.  Casting the full grid up front turned a 2.8 GB uint8 grid into an
+        # 11 GB float32 (× billions of voxels) and was the memory balloon after voxelize.
+        raw = self.t_geo.array
+        # Bound BOTH by a linear cap (max_dim) AND a voxel budget so a mid-size grid
+        # (e.g. 752³) can't slip through with step=1 and run marching-cubes on hundreds
+        # of millions of voxels.
         step = max(1,
-                   max(vol.shape) // max_dim,
-                   int(np.ceil((vol.size / float(budget)) ** (1.0 / 3.0))))
+                   max(raw.shape) // max_dim,
+                   int(np.ceil((raw.size / float(budget)) ** (1.0 / 3.0))))
         if step > 1:
-            vol = vol[::step, ::step, ::step]
+            raw = raw[::step, ::step, ::step]
+        vol = np.ascontiguousarray(raw).astype(np.float32)   # only the DECIMATED grid -> float32
         disp_dim = list(vol.shape)                        # decimated grid actually rendered
         if not np.any(vol > 0.5):
             return {"vertices": [], "normals": [], "indices": [], "gl_scale": 1.0, "display_dim": disp_dim, "step": int(step)}

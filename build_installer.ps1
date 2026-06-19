@@ -38,8 +38,13 @@ Write-Host "Re-syncing vamtoolbox -> build\python ..."
 robocopy vamtoolbox build\python\Lib\site-packages\vamtoolbox /E /NFL /NDL /NJH /NJS /NC /NS | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed (exit $LASTEXITCODE)" }
 
-# 4) Safety: keep torch OUT of the slim runtime.
-if (Test-Path "build\python\Lib\site-packages\torch") { Write-Warning "torch present in build\python - installer will be ~0.5 GB larger. Move it out first." }
+# 4) Diffusion runtime (1.0.1+): torch (CPU FFT) + cupy (GPU separable) are now
+#    bundled on purpose so the diffusion deconvolution is fast (GPU ~1.4 min, torch
+#    CPU ~20 min) instead of the single-threaded scipy fallback (~2 hrs).  cupy
+#    resolves its CUDA libs from the system CUDA Toolkit at runtime (machines without
+#    one fall back to CPU gracefully).  ~+0.7 GB runtime vs the old slim build.
+if (-not (Test-Path "build\python\Lib\site-packages\torch")) { Write-Warning "torch missing from build\python - diffusion will fall back to slow scipy. Copy torch+cupy from .venv first." }
+if (-not (Test-Path "build\python\Lib\site-packages\cupy"))  { Write-Warning "cupy missing from build\python - no GPU diffusion acceleration in the package." }
 
 # 5) Build: frontend (vite) then NSIS installer (electron-builder).
 $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"

@@ -317,13 +317,11 @@ def hardware():
 
 
 def _est_vox_time(voxels):
-    """Calibrated voxelize-time estimate (GPU render + embed + TargetGeometry).
-    Benchmarked: ~42 M vox/s up to ~1.2 B, then a memory cliff (~4 M vox/s) as the
-    multi-GB transient copies thrash RAM.  Piecewise-linear across that knee."""
-    KNEE, RATE1, RATE2 = 1.2e9, 42e6, 4.2e6
-    if voxels <= KNEE:
-        return max(1.5, voxels / RATE1)
-    return KNEE / RATE1 + (voxels - KNEE) / RATE2
+    """Voxelize-time estimate (GPU layer render + embed + load + TargetGeometry).
+    Measured ~120 M vox/s on this GPU once warmed (a 2.81 B-voxel grid took ~25 s),
+    plus a small fixed warm-up (GL context + ramp) that dominates tiny parts.  The
+    old 'memory cliff' is gone now that the TargetGeometry float64 balloon is fixed."""
+    return max(2.0, 1.5 + voxels / 120e6)
 
 
 @app.post("/api/start_voxelize")
@@ -333,7 +331,10 @@ def start_voxelize():
 
     if not loaded_models:
         return jsonify({"status": "error", "message": "No files loaded"}), 400
-    if vox_running:
+    # Busy if a voxelize is running OR a previous worker process is still alive (still
+    # dying/releasing memory).  Starting on top of a not-yet-dead 2B-voxel worker is what
+    # overloads RAM — the frontend's "finishing previous" loop retries until it's clear.
+    if vox_running or (vox_proc is not None and vox_proc.poll() is None):
         return jsonify({"status": "busy"}), 409
     if slice_running:
         # Serialize GPU work: a voxelize (OpenGL) + an optimize (CUDA) running at once
@@ -348,6 +349,10 @@ def start_voxelize():
         vam.t_geo = None
         vam.sino = None
         vam.vox = None
+        try:
+            import gc; gc.collect()        # free the PREVIOUS grid before loading a new one (no accumulation)
+        except Exception:
+            pass
         slice_done = False
         voxelize_done = False
 
@@ -404,6 +409,27 @@ def start_voxelize():
         voxels = max(1, grid[0] * grid[1] * grid[2])
         est = _est_vox_time(voxels)
 
+        # HARD MEMORY GUARD: refuse a grid that won't fit in available RAM. Empirically the
+        # backend peaks at ~22 bytes/voxel (worker grid + np.load + the float copies during
+        # TargetGeometry/optimize). Starting one that won't fit fills RAM with committed/
+        # dirty pages, OOM-kills the backend, and takes minutes for Windows to reclaim — so
+        # block it up front instead of crashing.
+        try:
+            import psutil
+            avail = psutil.virtual_memory().available
+            # ~8 B/voxel covers the workflow peak: uint8 grid + the optimize's full-volume
+            # float32 dose array + sinogram (the mesh-preview float32 balloon is now fixed).
+            # Keep ~20% headroom so the OS doesn't get pushed into paging/compression.
+            need = voxels * 8
+            if need > avail * 0.8:
+                vox_running = False
+                return jsonify({"status": "error", "message":
+                    f"Too large for memory: ~{voxels/1e9:.2f} billion voxels needs ~{need/1e9:.0f} GB "
+                    f"(keeping a safety margin); only {avail/1e9:.0f} GB is free. Lower the resolution "
+                    f"scale or shrink the part — or free up RAM — and try again."}), 400
+        except ImportError:
+            pass
+
         with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as tmp_file:
             tmp_file.write(unified_mesh.export(file_type='stl'))
             temp_stl_path = tmp_file.name
@@ -436,34 +462,87 @@ def start_voxelize():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+def _kill_stray_voxelize_workers():
+    """Kill ALL voxelize_worker.py processes (and their children) — including orphans a
+    previous backend instance left behind or a worker we lost track of.  Only one voxelize
+    runs at a time, so this safely reclaims leaked worker RAM that cancel/restart would
+    otherwise strand.  No-op if psutil is unavailable."""
+    killed = []
+    try:
+        import psutil
+    except Exception:
+        return killed
+    me = os.getpid()
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            if proc.pid == me:
+                continue
+            cl = proc.info.get("cmdline") or []
+            if any("voxelize_worker" in str(a) for a in cl):
+                for ch in proc.children(recursive=True):
+                    try: ch.kill()
+                    except Exception: pass
+                proc.kill()
+                killed.append(proc.pid)
+        except Exception:
+            continue
+    if killed:
+        print(f"[server] reclaimed stray voxelize workers: {killed}", flush=True)
+    return killed
+
+
 @app.post("/api/cancel_voxelize")
 def cancel_voxelize():
-    global vox_cancel, vox_running
+    global vox_cancel, vox_stage
     vox_cancel = True
+    vox_stage = "Cancelling…"
     p = vox_proc
     if p is not None and p.poll() is None:
+        # Forceful TREE kill (/T) so the worker AND any children die fast and release
+        # their (multi-GB) memory.  terminate() only hits the immediate process and can
+        # take seconds on a huge voxelize.
         try:
-            p.terminate()                       # kill the voxelize subprocess outright
-            try:
-                p.wait(timeout=3)
-            except Exception:
-                p.kill()
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10)
         except Exception:
-            traceback.print_exc()
-    vox_running = False
-    print("[server] voxelize cancelled — subprocess killed")
+            try:
+                p.kill()
+            except Exception:
+                traceback.print_exc()
+    # Also sweep any voxelize workers we lost track of (orphans), so cancel reliably frees RAM.
+    _kill_stray_voxelize_workers()
+    # Release the grid the BACKEND is holding — this (not the worker) is the multi-GB
+    # memory for a big part, and cancel previously left it allocated.
+    try:
+        vam.t_geo = None
+        vam.vox = None
+        vam.sino = None
+        import gc
+        gc.collect()
+    except Exception:
+        pass
+    # NOTE: do NOT set vox_running=False here.  The owning monitor thread flips it once
+    # communicate() confirms the process is actually dead+reaped — that's what blocks a
+    # too-early restart from doubling up voxelizations and overloading memory.
+    print("[server] voxelize cancel requested — process tree killed, backend grid freed; awaiting reap")
     return jsonify({"status": "ok"})
 
 
 def _run_voxelize_job(temp_stl_path, out_npy):
     global vox_running, vox_done, vox_error, vox_stage, voxelize_done, voxel_info, vox_proc
-    p = vox_proc
+    p = vox_proc                                  # the subprocess THIS monitor owns
     try:
         out = ""
         if p is not None:
             out, _ = p.communicate()            # wait for the subprocess to finish/die
         if out:
             print(out, end="")                  # tee the worker's log into ours
+        # If a newer voxelize replaced us while we were blocked on communicate(), bail
+        # WITHOUT touching any shared state — otherwise we clobber the new job (the bug
+        # where a cancelled run's stale monitor flips the bar to "done" and orphans the
+        # new process so cancel can no longer kill it).
+        if vox_proc is not p:
+            return
         if vox_cancel:
             vox_stage = "cancelled"
             return
@@ -474,6 +553,13 @@ def _run_voxelize_job(temp_stl_path, out_npy):
             vox_error = "voxelize produced no output"
             return
         arr = np.load(out_npy)
+        # Re-check cancellation AFTER the (multi-GB, uninterruptible) np.load: if the user
+        # cancelled while the load was running, DROP the grid instead of holding it in the
+        # backend — otherwise cancel "doesn't free the memory".
+        if vox_cancel or vox_proc is not p:
+            del arr
+            import gc; gc.collect()
+            return
         vam.t_geo = vamtoolbox.geometry.TargetGeometry(target=arr)
         vam.t_geo.zero_dose = None
         voxel_info = {
@@ -485,18 +571,29 @@ def _run_voxelize_job(temp_stl_path, out_npy):
         vox_stage = "done"
         print(f"[server] Voxelization complete: shape={arr.shape}")
     except Exception as e:
-        if not vox_cancel:
+        if vox_proc is p and not vox_cancel:
             vox_error = str(e)
             traceback.print_exc()
     finally:
-        vox_running = False
-        vox_proc = None
+        # Only clear shared state if we still own the active job — never clobber a newer one.
+        if vox_proc is p:
+            vox_running = False
+            vox_proc = None
+        try:
+            if os.path.exists(out_npy):
+                os.remove(out_npy)              # a cancelled 2B-voxel .npy can be GBs — don't leak it
+        except Exception:
+            pass
         for pth in (temp_stl_path, out_npy):
             try:
                 if pth and os.path.exists(pth):
                     os.remove(pth)
             except Exception:
                 pass
+        try:
+            import gc; gc.collect()        # force-free transient load buffers / discarded grids
+        except Exception:
+            pass
 
 @app.get("/api/poll")
 def poll():
@@ -1035,6 +1132,7 @@ def _run_slice_job():
         slice_proc = subprocess.Popen(
             [sys.executable, worker, cfg_path],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, cwd=repo_root, bufsize=1)
+        slice_error_msg = None                               # worker's own error text (@@ERR), if any
         for line in slice_proc.stdout:                       # stream progress + tee the log
             if line.startswith("@@P\t"):
                 try:
@@ -1044,6 +1142,8 @@ def _run_slice_job():
                     pass
             elif line.startswith("@@S\t"):
                 slice_stage = line.rstrip("\n").split("\t", 1)[1]
+            elif line.startswith("@@ERR\t"):
+                slice_error_msg = line.rstrip("\n").split("\t", 1)[1]
             else:
                 sys.stdout.write(line)
         slice_proc.wait()
@@ -1051,7 +1151,8 @@ def _run_slice_job():
         if slice_cancel:
             slice_stage = "cancelled"; print("[server] Optimize cancelled — subprocess killed"); return
         if slice_proc.returncode != 0:
-            raise RuntimeError(f"optimize worker exited with code {slice_proc.returncode}")
+            # surface the worker's real message (e.g. the diffusion RAM guard) to the GUI
+            raise RuntimeError(slice_error_msg or f"optimize worker exited with code {slice_proc.returncode}")
 
         # --- load the worker's results back into our vam ---
         with open(os.path.join(workdir, "sino.pkl"), "rb") as f:
@@ -1334,6 +1435,9 @@ def handle_exception(e):
     }), code
 
 if __name__ == "__main__":
+    # Reclaim any voxelize workers orphaned by a previous backend instance (a restart
+    # while one was running) so they don't keep leaking RAM into the new session.
+    _kill_stray_voxelize_workers()
     # Port is env-driven so a dev build (:5274) never collides with an installed
     # Tomo (:5174) on the same machine.  Electron passes TOMO_BACKEND_PORT.
     app.run(host="localhost", port=int(os.environ.get("TOMO_BACKEND_PORT", "5174")), debug=False, threaded=True)

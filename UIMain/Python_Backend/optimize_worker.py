@@ -99,4 +99,13 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as _e:
+        import traceback as _tb
+        _tb.print_exc()
+        # one-line structured error the parent parses and shows in the GUI banner
+        # (instead of a generic "optimize worker exited with code 1").
+        print("@@ERR\t%s" % str(_e).replace("\n", " ").replace("\t", " "), flush=True)
+        sys.stdout.flush(); sys.stderr.flush()
+        os._exit(1)

@@ -188,7 +188,7 @@ export default function App() {
   // Materials: named bundles of optics/chemistry that drive the run — refractive
   // index (vial correction), absorption, diffusion.  Choose one, edit it, add new.
   const [materials, setMaterials] = useState([
-    { id: "default", name: "OpenCAL resin", index: 1.51, absorption: false, absorptionCoeff: 0.207, diffusion: false, diffusionCoeff: 1e-4 },
+    { id: "default", name: "OpenCAL resin", index: 1.51, absorption: false, absorptionCoeff: 0.207, diffusion: false, diffusionCoeff: 1.1816e-4 },
   ]);
   const [materialId, setMaterialId] = useState("default");
   const activeMaterial = materials.find(m => m.id === materialId) || materials[0];
@@ -782,7 +782,7 @@ export default function App() {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ n_iter: nIter, d_h: dH, d_l: dL, filter: "hamming", cuda: cudaEnabled,
                                learning_rate: learningRate, eps: bclpEps, weight: bclpWeight,
-                               method, absorption, diffusion, slab, verbose: verboseOpt,
+                               method, absorption, diffusion: diffusion && method === "BCLP", slab, verbose: verboseOpt,
                                vial_radius_mm: cylinder.radius,
                                resin_ri: activeMaterial.index, diffusion_coeff: activeMaterial.diffusionCoeff,
                                absorption_coeff: activeMaterial.absorptionCoeff,
@@ -1004,9 +1004,11 @@ export default function App() {
     const voxels = xy * xy * z;
     // Calibrated piecewise model: ~42 M vox/s, with a memory cliff (~4.2 M vox/s)
     // past ~1.2 B voxels where multi-GB transient copies thrash RAM.
-    const KNEE = 1.2e9, R1 = 42e6, R2 = 4.2e6;
-    const voxSecs = voxels <= KNEE ? Math.max(1.5, voxels / R1) : KNEE / R1 + (voxels - KNEE) / R2;
-    const meshSecs = Math.max(3, Math.min(voxels, 120e6) / 4e6);   // marching-cubes + serialize the preview mesh
+    // Linear ~90 M vox/s on this GPU (a 2.81 B-voxel grid measured ~30 s). The old
+    // memory-cliff term is obsolete now that the TargetGeometry float64-meshgrid balloon
+    // is fixed. Mesh build runs on the decimated grid (<=120 M voxels), so it's quick.
+    const voxSecs = Math.max(2.0, 1.5 + voxels / 120e6);   // ~120 M vox/s warmed + GL warm-up
+    const meshSecs = Math.max(2, Math.min(voxels, 120e6) / 30e6);   // marching-cubes on the decimated grid
     return { voxels, dim: [xy, xy, z], secs: voxSecs + meshSecs, voxSecs, meshSecs };
   }, [footprint, resolution]);
 
@@ -1026,8 +1028,7 @@ export default function App() {
     if (!autoScaleSuggest || !voxEstimate || voxEstimate.voxels <= threshold) return null;
     const scale = Math.cbrt(TARGET / voxEstimate.voxels);     // linear scale (<1)
     const newPitch = resolution / scale;                      // coarser pitch (mm)
-    const KNEE = 1.2e9, R1 = 42e6, R2 = 4.2e6;
-    const newSecs = TARGET <= KNEE ? Math.max(1.5, TARGET / R1) : KNEE / R1 + (TARGET - KNEE) / R2;
+    const newSecs = Math.max(2.0, 1.5 + TARGET / 120e6);   // ~120 M vox/s warmed + GL warm-up
     const ramBound = voxEstimate.voxels > ramThreshold;
     return { scale, newPitch, newVox: TARGET, newSecs, speedup: voxEstimate.secs / newSecs, cuda, ramBound };
   }, [voxEstimate, resolution, hwInfo, autoScaleSuggest, cudaEnabled]);
@@ -1278,9 +1279,9 @@ export default function App() {
                 {(sliceStatus === "running" || sliceStatus === "cancelling") ? (<>
                   <div style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Optimizing print</div>
                   <div style={{ width: "100%" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 5 }}>
-                      <span style={{ fontSize: 11, color: C.text }}>{sliceStage || "Preparing…"}</span>
-                      <span style={{ fontSize: 11, fontWeight: 700, color: C.blue }}>{Math.round(sliceProgress * 100)}%</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8, marginBottom: 5 }}>
+                      <span style={{ fontSize: 11, color: C.text, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={sliceStage}>{sliceStage || "Preparing…"}</span>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: C.blue, flexShrink: 0 }}>{Math.round(sliceProgress * 100)}%</span>
                     </div>
                     <div style={{ height: 8, background: C.bgT, borderRadius: 4, overflow: "hidden" }}>
                       <div style={{ width: `${sliceProgress * 100}%`, height: "100%", background: C.blue, transition: "width .3s" }} />
@@ -1525,10 +1526,10 @@ export default function App() {
               </div>
               <div>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Toggle value={diffusion} disabled={method !== "BCLP"} hint={method !== "BCLP" ? "(BCLP only)" : ""} onChange={setDiffusion} label="Diffusion correction" />
+                  <span style={{ fontSize: 11, color: C.muted }}>Diffusion: <b style={{ color: C.text }}>{activeMaterial.diffusion ? `on · ${activeMaterial.diffusionCoeff} mm²/s` : "off"}</b> <span style={{ opacity: 0.7 }}>(in {activeMaterial.name})</span>{activeMaterial.diffusion && method !== "BCLP" ? <span style={{ color: "#d68a00" }}> · needs BCLP</span> : null}</span>
                   <InfoBtn open={infoOpen === "diff"} onClick={infoTog("diff")} />
                 </div>
-                {infoOpen === "diff" && <div style={infoPop}>Corrects for thermal/chemical diffusion that blurs the cured pattern after exposure (sharper edges). BCLP only.</div>}
+                {infoOpen === "diff" && <div style={infoPop}>Pre-deconvolves the target (Richardson-Lucy) to counter dose spread from resin diffusion + optical blur, so fine features cure at the same time as bulk and aren't under-cured (Orth et al. 2023). Set this in the material editor; BCLP only (it needs the grey-scale target).</div>}
               </div>
 
               <div>
