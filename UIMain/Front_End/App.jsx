@@ -657,7 +657,7 @@ export default function App() {
     e.preventDefault(); setDragOver(false);
     if (!(step === 1 && !hasModel)) return;   // only on the Model step, before a model is loaded
     const f = e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f && f.path && f.name.toLowerCase().endsWith(".stl")) loadStlPath(f.path);
+    if (f && f.path && /\.(stl|3mf)$/i.test(f.name)) loadStlPath(f.path);
   };
 
   async function startVoxelize() {
@@ -882,6 +882,23 @@ export default function App() {
       if (d.status === "error") alert("Save failed: " + (d.message || "unknown error"));
     } catch (e) { console.error("save run failed", e); }
     setSavingRun(false);
+  }
+
+  async function handleExportVoxels(field) {
+    // field: "target" (binary voxel grid, lossless round-trip) or "dose" (optimized
+    // dose field, for inspection).  One native Save dialog, backend writes the .3mf.
+    const stlName = ((models[activeIdx] || models[0])?.filename || "Tomo")
+      .replace(/\.(stl|3mf)$/i, "").replace(/[^\w.\-]+/g, "_");
+    try {
+      const res = await fetch(`${API}/export_voxels_3mf`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ field, default_name: stlName }),
+      });
+      const d = await res.json();
+      if (d.status === "cancelled") return;
+      if (d.status !== "ok") { alert("3MF export failed: " + (d.message || "unknown error")); return; }
+      console.log("exported 3MF:", d.saved, d.shape);
+    } catch (e) { console.error("export voxels failed", e); alert("3MF export failed"); }
   }
 
   async function handleLoadRun() {
@@ -1244,7 +1261,7 @@ export default function App() {
 
           {!hasModel && step >= 1 && !loading && (
             <div style={{ position: "absolute", top: 16, left: "50%", transform: "translateX(-50%)", fontSize: 12, color: C.text, background: `${C.bgS}ee`, padding: "8px 16px", borderRadius: 6, border: `1px solid ${C.border}` }}>
-              Add or drag-and-drop an STL into the vial
+              Add or drag-and-drop an STL or 3MF into the vial
             </div>
           )}
           {outOfBounds && step <= 1 && !loading && (
@@ -1325,7 +1342,7 @@ export default function App() {
           )}
           {dragOver && (
             <div style={{ position: "absolute", inset: 0, border: `2px dashed ${C.blue}`, background: `${C.blue}14`, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 11, pointerEvents: "none" }}>
-              <div style={{ fontSize: 15, fontWeight: 700, color: C.blue }}>Drop STL to load</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: C.blue }}>Drop STL / 3MF to load</div>
             </div>
           )}
         </div>
@@ -1368,7 +1385,7 @@ export default function App() {
             {step === 1 && (<>
               <div style={{ fontSize: 13, fontWeight: 700, color: "#fff" }}>Model</div>
               {!hasModel ? (
-                <Btn variant="primary" onClick={openFile} disabled={isImporting} style={{ width: "100%" }}>{isImporting ? "Loading…" : "+ Add STL(s)"}</Btn>
+                <Btn variant="primary" onClick={openFile} disabled={isImporting} style={{ width: "100%" }}>{isImporting ? "Loading…" : "+ Add model(s)"}</Btn>
               ) : (<>
                 {models.length > 1 && (
                   <select value={activeIdx} onChange={e => setActiveIdx(parseInt(e.target.value))} style={selInput}>
@@ -1376,7 +1393,7 @@ export default function App() {
                   </select>
                 )}
                 <div style={{ display: "flex", gap: 8 }}>
-                  <Btn variant="primary" onClick={openFile} disabled={isImporting} style={{ flex: 1 }}>{isImporting ? "Loading…" : "+ Add STL(s)"}</Btn>
+                  <Btn variant="primary" onClick={openFile} disabled={isImporting} style={{ flex: 1 }}>{isImporting ? "Loading…" : "+ Add model(s)"}</Btn>
                   <Btn variant="danger" onClick={removeActiveModel} style={{ flex: 1 }}>Remove</Btn>
                 </div>
                 <div style={{ fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
@@ -1462,6 +1479,9 @@ export default function App() {
               </Btn>
               {voxStatus === "running" && <Indeterminate label="Building voxel grid…" />}
               {voxStatus === "done" && voxInfo && <div style={{ fontSize: 11, color: C.green }}>✓ {voxInfo.x}×{voxInfo.y}×{voxInfo.z} · {voxInfo.fill_pct?.toFixed(1)}% fill</div>}
+              {voxStatus === "done" && (
+                <Btn onClick={() => handleExportVoxels("target")} style={{ width: "100%", marginTop: 6 }}>⤓ Export target → 3MF</Btn>
+              )}
               {voxStatus === "error" && <div style={{ fontSize: 11, color: C.red }}>✗ {voxError}</div>}
             </>)}
 
@@ -1598,6 +1618,7 @@ export default function App() {
                   style={{ width: 64, background: "#16161f", color: C.text, border: `1px solid ${C.border}`, borderRadius: 4, padding: "5px 7px", fontSize: 14, fontWeight: 700, fontFamily: "monospace", outline: "none", textAlign: "right" }} />
                 <span style={{ fontSize: 11, color: C.muted }}>min</span>
               </div>
+              <Btn onClick={() => handleExportVoxels("dose")} disabled={sliceStatus !== "done"} title="Export the optimized dose field as a volumetric 3MF (image3d) for inspection">⤓ Dose → 3MF</Btn>
               <Btn variant="success" onClick={handleDownloadRun} disabled={!previewInfo || savingRun}>{savingRun ? "Encoding + saving…" : "Save run"}</Btn>
             </div>
           </div>

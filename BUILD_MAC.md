@@ -21,6 +21,29 @@ Metal). A packaged `.dmg` is not done yet — see "Remaining" below.
   `subprocess.CREATE_NO_WINDOW` uses (a Windows-only flag) with `getattr(..., 0)`,
   and made the voxelize cancel tree-kill cross-platform (psutil on macOS/Linux).
 
+## Features added on `feature/3mf-and-benchmarks`
+
+Branched off `mac-support`. All three lean on our Metal-capable VAMToolbox fork.
+
+- **3MF import.** `.3mf` files load anywhere an STL does (Add-model dialog,
+  drag-and-drop). The bundled trimesh can't read 3MF, so mesh load now routes
+  through `vamtoolbox.threemf.load_mesh_any` (lib3mf → trimesh) in
+  `server.py` (`load_stl_for_viewer`, `start_voxelize`) and `VAM_Ob.get_stl_bounds`.
+  Solid meshes import directly; a **beam-lattice-only** 3MF has no triangles and is
+  rejected with a pointer to `voxelize_3mf` (analytic capsule rasterization) —
+  wiring that lattice/insert/zero-dose path into Tomo's single-target pipeline is a
+  follow-up.
+- **3MF volumetric export** (`POST /api/export_voxels_3mf`). Writes the 3MF
+  **Volumetric** extension (image3d / ImageStack, a PNG stack). Two fields:
+  `target` (the binary voxel grid — **lossless** round-trip, so a voxelization can
+  be shared/reloaded without re-voxelizing) and `dose` (the optimized dose field,
+  for inspection in a volumetric viewer). UI: **⤓ Export target → 3MF** on the
+  Voxelize step; **⤓ Dose → 3MF** in the Print-Output header. Spacing = `vam.res`
+  mm/voxel.
+- **Optimize benchmark** — `benchmarks/optimize_bench.py` times the same pipeline
+  the app runs on Metal vs pure-CPU. See `benchmarks/README.md`; on this hardware
+  Metal is ~11–16× the CPU path with identical loss.
+
 ## One-time setup
 
 Requires **Node 20+** (upstream repo predates it; system Node may be old):

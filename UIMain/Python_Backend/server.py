@@ -152,6 +152,7 @@ SLICE_SKIP_ATTRS = {"t_geo", "sino", "recon", "_pipe", "dose_metrics", "_verbose
 
 import threading
 import vamtoolbox
+from vamtoolbox import threemf as _tmf   # .3mf import (lib3mf) + volumetric voxel export
 
 # =============================================================================
 # FRONTEND CATCH-ALL ROUTE
@@ -282,7 +283,7 @@ def open_file_dialog(title="Open STL File", filt="STL files (*.stl)|*.stl|All fi
         return None
 
 def load_stl_for_viewer(path: str) -> dict:
-    mesh = trimesh.load_mesh(path)
+    mesh = _tmf.load_mesh_any(path)          # .stl/.obj via trimesh, .3mf via lib3mf
     if isinstance(mesh, trimesh.Scene):
         mesh = trimesh.util.concatenate([g for g in mesh.geometry.values()])
     
@@ -303,7 +304,10 @@ def load_stl_for_viewer(path: str) -> dict:
 
 @app.post("/api/open_stl_dialog")
 def open_stl_dialog():
-    paths = open_file_dialog(multi=True)   # allow selecting several STLs at once
+    paths = open_file_dialog(
+        title="Open model (STL / 3MF)",
+        filt="Models (*.stl;*.3mf)|*.stl;*.3mf|STL files (*.stl)|*.stl|3MF files (*.3mf)|*.3mf|All files (*.*)|*.*",
+        multi=True)   # allow selecting several models at once
     if not paths:
         return jsonify({"status": "cancelled"})
     if isinstance(paths, str):
@@ -434,7 +438,7 @@ def start_voxelize():
             if not os.path.exists(m_info["path"]):
                 print(f"[server] skipping model with missing file: {m_info['path']}")
                 continue
-            raw_mesh = trimesh.load_mesh(m_info["path"])
+            raw_mesh = _tmf.load_mesh_any(m_info["path"])   # .stl/.obj via trimesh, .3mf via lib3mf
             if isinstance(raw_mesh, trimesh.Scene):
                 mesh = trimesh.util.concatenate([g for g in raw_mesh.geometry.values()])
             else:
@@ -1031,12 +1035,13 @@ def export_log():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-def save_file_dialog(default_name):
+def save_file_dialog(default_name, filt="MP4 video (*.mp4)|*.mp4",
+                     prompt="Save run (choose the .mp4 location)"):
     """Native Save-As dialog. Returns the chosen path or None.  Same approach as
     open_file_dialog (tkinter can't run on a Flask worker thread): PowerShell
     WinForms on Windows, osascript `choose file name` on macOS."""
     if sys.platform == "darwin":
-        return _mac_save_dialog(default_name, prompt="Save run (choose the .mp4 location)")
+        return _mac_save_dialog(default_name, prompt=prompt)
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms;"
         "Add-Type -AssemblyName System.Drawing;"
@@ -1046,8 +1051,8 @@ def save_file_dialog(default_name):
         "$o.Size=New-Object System.Drawing.Size(1,1); $o.StartPosition='CenterScreen';"
         "$o.Add_Shown({ $o.Activate(); $o.BringToFront() }); $o.Show();"
         "$d = New-Object System.Windows.Forms.SaveFileDialog;"
-        "$d.Title='Save run (choose the .mp4 location)';"
-        "$d.Filter='MP4 video (*.mp4)|*.mp4';"
+        "$d.Title='" + str(prompt).replace("'", "''") + "';"
+        "$d.Filter='" + str(filt).replace("'", "''") + "';"
         "$d.FileName='" + str(default_name).replace("'", "''") + "';"
         "$r = $d.ShowDialog($o); $o.Close();"
         "if ($r -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.FileName }"
@@ -1108,6 +1113,51 @@ def save_run():
             saved.append(base + ".tomo")
         print(f"[server] Saved run -> {', '.join(os.path.basename(s) for s in saved)}")
         return jsonify({"status": "ok", "saved": saved})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.post("/api/export_voxels_3mf")
+def export_voxels_3mf():
+    """Export a voxel grid to the 3MF **Volumetric** extension (image3d / ImageStack):
+
+      * field="target" — the binary voxelized target (round-trips losslessly, so a
+        voxelization can be shared/re-loaded without re-voxelizing).
+      * field="dose"   — the optimized dose reconstruction (float field) for
+        inspection/visualization in a 3MF volumetric viewer.
+
+    Writes one native Save dialog, then calls vamtoolbox.threemf.export_voxels_3mf.
+    """
+    data = request.get_json(silent=True) or {}
+    field = str(data.get("field", "target")).lower()
+    default_name = (str(data.get("default_name", "Tomo")).strip() or "Tomo")
+
+    if field == "dose":
+        if getattr(vam, "recon", None) is None:
+            return jsonify({"status": "error", "message": "No dose field yet — run an optimization first."}), 400
+        arr = np.asarray(getattr(vam.recon, "array", vam.recon), dtype=np.float32)
+        name, suffix = "dose", "_dose"
+    else:
+        if getattr(vam, "t_geo", None) is None:
+            return jsonify({"status": "error", "message": "No voxel grid yet — voxelize a model first."}), 400
+        arr = np.asarray(getattr(vam.t_geo, "array", vam.t_geo))
+        name, suffix = "target", ""
+
+    path = save_file_dialog(default_name + suffix + ".3mf",
+                            filt="3MF volumetric (*.3mf)|*.3mf",
+                            prompt="Export voxels to 3MF (volumetric)")
+    if not path:
+        return jsonify({"status": "cancelled"})
+    if not path.lower().endswith(".3mf"):
+        path += ".3mf"
+    try:
+        res = float(getattr(vam, "res", 1.0) or 1.0)      # mm/voxel -> uniform spacing
+        _tmf.export_voxels_3mf(path, arr, spacing=(res, res, res), name=name)
+        print(f"[server] exported {field} voxels -> {os.path.basename(path)} "
+              f"(shape {tuple(arr.shape)}, {res} mm/vox)")
+        return jsonify({"status": "ok", "saved": path, "field": field,
+                        "shape": list(arr.shape), "spacing_mm": res})
     except Exception as e:
         traceback.print_exc()
         return jsonify({"status": "error", "message": str(e)}), 500

@@ -72,7 +72,7 @@ class VAM:
 
     @staticmethod
     def get_stl_bounds(path: str) -> dict:
-        mesh = trimesh.load_mesh(path)
+        mesh = vamtb.threemf.load_mesh_any(path)   # .stl/.obj via trimesh, .3mf via lib3mf
         lo, hi = mesh.bounds
         return {
             "x_mm": float(hi[0] - lo[0]),
