@@ -75,12 +75,45 @@ The backend reports `cuda: False | metal: True` and serves on `:5274` (dev).
 > If launched from an Electron-based terminal/IDE, unset `ELECTRON_RUN_AS_NODE`
 > first, or the Electron binary runs headless as Node instead of opening a window.
 
+## Packaging a `.dmg`
+
+```bash
+VAMTOOLBOX=/path/to/VAMToolbox ./build_mac.sh
+# -> build/dist-app/Tomo-<version>-arm64.dmg  (~419 MB)
+```
+
+`build_mac.sh` assembles a **self-contained, relocatable CPython 3.13** under
+`build/python` (from python-build-standalone), pip-installs the backend deps +
+**our Metal `vamtoolbox` non-editable** (so the Metal source is copied into the
+bundle) + `metalcompute`, verifies `metal == True`, slims it, then runs
+`electron-builder`. `electron-builder`'s `extraResources` copies `build/python`
+-> `Resources/python` and `Python_Backend` -> `Resources/backend`; `main.cjs`
+resolves `Resources/python/bin/python3` + `Resources/python/lib/python3.13/
+site-packages` in packaged mode (`TOMO_PY_VER` overrides the `3.13` default).
+
+**Metal acceleration ships in the bundle** — verified: the packaged app spawns
+`Tomo.app/Contents/Resources/python/bin/python3`, and that interpreter reports
+`metal == True` (`metal_available()` True); `/api/hardware` shows
+`"metal": true`, `"gpu": "Apple Metal (GPU)"`.
+
+### Gatekeeper (unsigned build)
+
+The build is **unsigned** (`identity: null` / `CSC_IDENTITY_AUTO_DISCOVERY=false`).
+electron-builder ad-hoc signs the app so it runs locally, but macOS Gatekeeper
+still prompts on first open of a not-notarized app. To launch:
+
+- **right-click the app -> Open** (once), or
+- `xattr -dr com.apple.quarantine "/Applications/Tomo.app"` after installing.
+
+Running the binary directly (`Tomo.app/Contents/MacOS/Tomo`) bypasses the prompt.
+For distribution without the prompt you'd need an Apple Developer ID signature +
+notarization.
+
 ## Remaining (not done)
 
-- **Packaged `.dmg`.** `extraResources` still points at a Windows `build/python`
-  runtime. Needs a macOS Python runtime bundle (PyInstaller via the existing
-  `VVAM.spec`, or a relocatable venv) + `TOMO_PY_VER` matching it.
 - **File dialogs** are implemented but want a real click-through test (open STL,
   save .mp4) on macOS.
+- **Signing/notarization** for friction-free distribution (needs a paid Apple
+  Developer ID). Fine unsigned for local/personal use.
 - **`vamtoolbox` dependency list** is incomplete upstream; the explicit pip list
-  above compensates. Worth fixing in VAMToolbox's packaging.
+  compensates. Worth fixing in VAMToolbox's packaging.

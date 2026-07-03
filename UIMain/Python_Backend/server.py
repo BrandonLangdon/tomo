@@ -363,10 +363,20 @@ def hardware():
         import vamtoolbox.util.hardware as _hw
         info = _hw.detect_system()
         gpus = info.get("gpus", []) or []
+        metal = bool(info.get("metal"))
+        # Report the accelerator actually in use: a CUDA GPU, else Apple Metal
+        # (the projectorconstructor auto-selects Metal on Apple Silicon), else CPU.
+        if gpus:
+            gpu_name = gpus[0]["name"]
+        elif metal:
+            gpu_name = "Apple Metal (GPU)"
+        else:
+            gpu_name = None
         return jsonify({
             "status": "ok",
             "cuda": bool(info.get("cuda")),
-            "gpu": (gpus[0]["name"] if gpus else None),
+            "metal": metal,
+            "gpu": gpu_name,
             "vram_gb": (gpus[0].get("vram_total_gb") if gpus else None),
             "cpu_cores": info.get("cpu_logical"),
             "ram_gb": info.get("ram_total_gb"),
