@@ -109,6 +109,26 @@ Running the binary directly (`Tomo.app/Contents/MacOS/Tomo`) bypasses the prompt
 For distribution without the prompt you'd need an Apple Developer ID signature +
 notarization.
 
+## Known issues / to test
+
+- **Resizing the window during launch can hang it on the loading screen**
+  (observed 2026-07-03, macOS packaged build). Repro: start the app and drag-
+  resize the window *before* the backend is ready (while the "starting" overlay
+  is up). It then never gets past the loading screen.
+  *Leads:* the window opens immediately and a `useEffect` polls `/api/hardware`
+  until it answers, flipping `backendReady` ([App.jsx](UIMain/Front_End/App.jsx)
+  ~L221–236). Its deps are `[]`, so a resize shouldn't restart it — which
+  suggests the real cause is a **renderer exception during early Three.js/WebGL
+  init on resize** that tears down the React tree; the poll effect's cleanup then
+  sets `cancelled = true`, so `backendReady` never flips and the overlay is
+  permanent. There's no React error boundary around the init/loading path.
+  *To investigate:* reproduce with DevTools open (check the renderer console) and
+  read `~/Library/Application Support/Tomo/tomo-main.log`; likely fixes — add an
+  error boundary, make the backend-readiness poll survive/restart across a render
+  error, and/or debounce resize until `backendReady`. Probably **not Mac-specific**
+  (the open-window-before-backend design is upstream), so worth checking on
+  Windows too.
+
 ## Remaining (not done)
 
 - **File dialogs** are implemented but want a real click-through test (open STL,
