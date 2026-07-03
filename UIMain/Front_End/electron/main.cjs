@@ -17,15 +17,27 @@ const REPO_ROOT = path.resolve(__dirname, "..", "..", "..");
 
 // In a packaged build the self-contained Python runtime + backend ship under
 // resources/ (electron-builder extraResources); in dev we use the repo .venv + src.
+// Python runtime layout differs by OS: Windows uses python.exe + Lib\site-packages
+// and a Scripts\ venv dir; macOS/Linux use bin/python(3) + lib/pythonX.Y/site-packages.
+const IS_WIN = process.platform === "win32";
+// Bundled-runtime Python version (macOS/Linux packaged build) — must match the
+// runtime produced by the packaging step; only used when app.isPackaged.
+const PY_VER = process.env.TOMO_PY_VER || "3.13";
 let PY_EXE, BACKEND_DIR, SERVER, PY_SITE;
 if (app.isPackaged) {
   const RES = process.resourcesPath;
-  PY_EXE = path.join(RES, "python", "python.exe");
+  PY_EXE = IS_WIN
+    ? path.join(RES, "python", "python.exe")
+    : path.join(RES, "python", "bin", "python3");
   BACKEND_DIR = path.join(RES, "backend");
   SERVER = path.join(BACKEND_DIR, "server.py");
-  PY_SITE = path.join(RES, "python", "Lib", "site-packages");   // vamtoolbox lives here
+  PY_SITE = IS_WIN                                               // vamtoolbox lives here
+    ? path.join(RES, "python", "Lib", "site-packages")
+    : path.join(RES, "python", "lib", `python${PY_VER}`, "site-packages");
 } else {
-  PY_EXE = path.join(REPO_ROOT, ".venv", "Scripts", "python.exe");
+  PY_EXE = IS_WIN
+    ? path.join(REPO_ROOT, ".venv", "Scripts", "python.exe")
+    : path.join(REPO_ROOT, ".venv", "bin", "python");
   BACKEND_DIR = path.join(REPO_ROOT, "UIMain", "Python_Backend");
   SERVER = path.join(BACKEND_DIR, "server.py");
   PY_SITE = REPO_ROOT;
