@@ -126,22 +126,37 @@ function createWindow() {
   mainWindow.on("closed", () => { mainWindow = null; });
 }
 
+// Make sure a backend is up (reuse if one is already answering, else spawn +
+// wait).  Used both on first launch and when the window is re-opened from the
+// Dock on macOS — the reopened window shows the startup screen and polls the
+// backend, so if it isn't running the app would hang there forever.
+async function ensureBackend() {
+  if (await pingBackend()) {
+    dbg(`reusing existing backend on :${BACKEND_PORT}`);
+    console.log(`[electron] reusing backend already running on :${BACKEND_PORT}`);
+    return;
+  }
+  dbg("no backend; starting it");
+  startBackend();
+  const ok = await waitForBackend();
+  dbg("waitForBackend -> " + ok);
+}
+
 app.whenReady().then(async () => {
   if (!gotTheLock) { app.quit(); return; }   // second instance — bail before spawning anything
   dbg("app ready");
   createWindow();                    // show the window IMMEDIATELY (no ~20-30s blank wait)
   dbg("window created");
-  if (await pingBackend()) {
-    dbg(`reusing existing backend on :${BACKEND_PORT}`);
-    console.log(`[electron] reusing backend already running on :${BACKEND_PORT}`);
-  } else {
-    dbg("no backend; starting it");
-    startBackend();
-    const ok = await waitForBackend();
-    dbg("waitForBackend -> " + ok);
-  }
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+  await ensureBackend();
+  // macOS: clicking the Dock icon after the window was closed re-creates it.
+  // The backend may have been torn down, so ensure it's back before the fresh
+  // startup screen starts polling (otherwise it hangs on "starting…").
+  app.on("activate", async () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      dbg("activate: re-creating window");
+      createWindow();
+      await ensureBackend();
+    }
   });
 });
 
@@ -162,7 +177,14 @@ function shutdown() {
   }
 }
 app.on("window-all-closed", () => {
-  shutdown();
-  if (process.platform !== "darwin") app.quit();
+  // macOS: closing the window does NOT quit the app (it stays in the Dock), so
+  // keep the backend alive for an instant, working reopen. Tearing it down here
+  // is what left a reopened app stuck on the startup screen (the new window
+  // polled a backend that had been killed). The backend is freed on real quit
+  // via before-quit -> shutdown().  Other platforms quit here, so tear down now.
+  if (process.platform !== "darwin") {
+    shutdown();
+    app.quit();
+  }
 });
 app.on("before-quit", shutdown);

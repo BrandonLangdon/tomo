@@ -111,6 +111,16 @@ notarization.
 
 ## Known issues / to test
 
+- **[FIXED 2026-07-03] Reopen-after-close hung on the startup screen.** Closing
+  the window with the red **X** left the app running in the Dock (correct macOS
+  behavior) but `window-all-closed` had *killed the Python backend*; clicking the
+  Dock icon re-created the window, whose fresh startup screen then polled a dead
+  backend forever. Fix in `electron/main.cjs`: on macOS keep the backend alive
+  across window-close (freed on real quit via `before-quit`), and `activate`
+  now calls `ensureBackend()` before/with re-creating the window as a safety net.
+  *(This may also have been the "resize during launch" hang below — same symptom,
+  a backend the UI never reaches — so retest that after this fix.)*
+
 - **Resizing the window during launch can hang it on the loading screen**
   (observed 2026-07-03, macOS packaged build). Repro: start the app and drag-
   resize the window *before* the backend is ready (while the "starting" overlay
