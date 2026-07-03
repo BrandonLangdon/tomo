@@ -168,20 +168,80 @@ def serve(path):
 # API ROUTES
 # =============================================================================
 
+def _exts_from_filter(filt):
+    """Pull bare extensions from a Windows filter string.
+
+    "STL files (*.stl)|*.stl|All files (*.*)|*.*" -> ["stl"] (drops the *.* wildcard).
+    """
+    import re
+    exts = [e.lower() for e in re.findall(r"\*\.([A-Za-z0-9]+)", filt or "")]
+    seen, out = set(), []
+    for e in exts:
+        if e != "*" and e not in seen:
+            seen.add(e); out.append(e)
+    return out
+
+
+def _osascript(script):
+    """Run an AppleScript and return stdout (or None on cancel/error)."""
+    try:
+        r = subprocess.run(["osascript", "-e", script],
+                           capture_output=True, text=True, timeout=300)
+        out = r.stdout.strip()
+        return out or None                       # user Cancel -> non-zero exit, empty out
+    except Exception as e:
+        print(f"[server] osascript dialog error: {e}")
+        return None
+
+
+def _mac_open_dialog(title, exts, multi):
+    """macOS native open dialog via `choose file` (osascript)."""
+    of_type = ""
+    if exts:
+        quoted = ", ".join(f'"{e}"' for e in exts)
+        of_type = f" of type {{{quoted}}}"
+    prompt = (title or "Open").replace('"', "'")
+    if multi:
+        script = (
+            f'set theFiles to choose file with prompt "{prompt}"{of_type} '
+            f'with multiple selections allowed\n'
+            'set out to ""\n'
+            'repeat with f in theFiles\n'
+            '    set out to out & POSIX path of f & linefeed\n'
+            'end repeat\n'
+            'return out'
+        )
+        out = _osascript(script)
+        return [p.strip() for p in out.splitlines() if p.strip()] if out else None
+    out = _osascript(f'POSIX path of (choose file with prompt "{prompt}"{of_type})')
+    return out or None
+
+
+def _mac_save_dialog(default_name, prompt="Save"):
+    """macOS native save dialog via `choose file name` (osascript)."""
+    dn = str(default_name).replace('"', "'")
+    out = _osascript(
+        f'POSIX path of (choose file name with prompt "{prompt}" default name "{dn}")')
+    return out or None
+
+
 def open_file_dialog(title="Open STL File", filt="STL files (*.stl)|*.stl|All files (*.*)|*.*", multi=False):
     """
-    Show a native Windows file-open dialog and return the selected path.
+    Show a native file-open dialog and return the selected path(s).
 
-    tkinter's Tk() requires the main thread (or at minimum an STA COM
-    apartment) which is not available on Flask worker threads.  Instead we
-    spawn a PowerShell process that shows a WinForms OpenFileDialog.
+    Runs off the Flask worker thread (tkinter needs the main thread / an STA COM
+    apartment), so we spawn a per-OS helper process:
+      * Windows -> PowerShell WinForms OpenFileDialog
+      * macOS   -> osascript `choose file`
 
-    Flags:
+    Flags (Windows):
       -STA           Required for WinForms/COM dialogs. PowerShell 7 defaults
                      to MTA; without -STA, ShowDialog() silently returns Cancel.
       -NoProfile     Skip profile scripts for fast startup.
       (no -NonInteractive) That flag can suppress GUI dialogs on some PS builds.
     """
+    if sys.platform == "darwin":
+        return _mac_open_dialog(title, _exts_from_filter(filt), multi)
     # A top-most invisible owner form forces the dialog to the FRONT — otherwise it can
     # open behind the Electron window and look like "nothing happened" (the flakiness).
     ps_script = (
@@ -209,7 +269,7 @@ def open_file_dialog(title="Open STL File", filt="STL files (*.stl)|*.stl|All fi
             capture_output=True,
             text=True,
             timeout=120,
-            creationflags=subprocess.CREATE_NO_WINDOW,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         path = result.stdout.strip()
         if not path and result.stderr.strip():
@@ -498,12 +558,24 @@ def cancel_voxelize():
     vox_stage = "Cancelling…"
     p = vox_proc
     if p is not None and p.poll() is None:
-        # Forceful TREE kill (/T) so the worker AND any children die fast and release
+        # Forceful TREE kill so the worker AND any children die fast and release
         # their (multi-GB) memory.  terminate() only hits the immediate process and can
         # take seconds on a huge voxelize.
         try:
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=10)
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)],
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                               timeout=10)
+            else:
+                # macOS/Linux: kill children first (psutil), then the process itself
+                try:
+                    import psutil
+                    proc = psutil.Process(p.pid)
+                    for child in proc.children(recursive=True):
+                        child.kill()
+                except Exception:
+                    pass
+                p.kill()
         except Exception:
             try:
                 p.kill()
@@ -849,7 +921,7 @@ def cancel_slice():
             if sys.platform == "win32":
                 # kill the worker AND any loky children (rebin / CPU projector pool) so nothing orphans
                 subprocess.run(["taskkill", "/pid", str(p.pid), "/T", "/F"],
-                               capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+                               capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
             else:
                 p.terminate()
             try:
@@ -950,9 +1022,11 @@ def export_log():
 
 
 def save_file_dialog(default_name):
-    """Native Windows Save-As dialog (PowerShell WinForms, top-most). Returns the
-    chosen path or None.  Same approach as open_file_dialog (tkinter can't run on a
-    Flask worker thread)."""
+    """Native Save-As dialog. Returns the chosen path or None.  Same approach as
+    open_file_dialog (tkinter can't run on a Flask worker thread): PowerShell
+    WinForms on Windows, osascript `choose file name` on macOS."""
+    if sys.platform == "darwin":
+        return _mac_save_dialog(default_name, prompt="Save run (choose the .mp4 location)")
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms;"
         "Add-Type -AssemblyName System.Drawing;"
@@ -971,7 +1045,7 @@ def save_file_dialog(default_name):
     try:
         res = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
                              capture_output=True, text=True, timeout=300,
-                             creationflags=subprocess.CREATE_NO_WINDOW)
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         path = res.stdout.strip()
         return path if path else None
     except Exception as e:

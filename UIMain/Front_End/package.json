@@ -25,6 +25,12 @@
       { "from": "../Python_Backend", "to": "backend", "filter": ["**/*", "!logs/**", "!**/__pycache__/**"] }
     ],
     "win": { "target": "nsis", "icon": "build/icon.ico" },
+    "mac": {
+      "target": ["dmg"],
+      "category": "public.app-category.graphics-design",
+      "identity": null,
+      "artifactName": "Tomo-${version}-${arch}.${ext}"
+    },
     "nsis": {
       "oneClick": false,
       "perMachine": false,
