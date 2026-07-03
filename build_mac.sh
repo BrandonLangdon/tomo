@@ -31,8 +31,14 @@ fi
 PY="$REPO/build/python/bin/python3"
 
 echo "==> [2/4] install backend deps + OUR vamtoolbox (Metal) into the runtime"
+# A prior build's slim step (step 3) strips pip/setuptools from build/python; step 1
+# skips re-extraction when the dir already exists, so restore pip before using it.
+"$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$PY" -m pip install -q --upgrade pip
-"$PY" -m pip install -q "$VAMTOOLBOX"           # non-editable -> copies Metal source in
+# --force-reinstall --no-deps: copy the CURRENT VAMToolbox source into the bundle
+# every build even when the version hasn't bumped (pip would otherwise say "already
+# satisfied" and ship a stale copy — e.g. missing threemf.load_mesh_any).
+"$PY" -m pip install -q --force-reinstall --no-deps "$VAMTOOLBOX"   # copies Metal source in
 "$PY" -m pip install -q flask flask-cors opencv-python psutil joblib imageio-ffmpeg \
     "metalcompute==0.2.9" dill matplotlib pyglet trimesh scikit-image Pillow numpy-stl \
     PyOpenGL lib3mf pyvista tqdm vedo scipy
