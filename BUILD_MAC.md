@@ -29,10 +29,12 @@ Branched off `mac-support`. All three lean on our Metal-capable VAMToolbox fork.
   drag-and-drop). The bundled trimesh can't read 3MF, so mesh load now routes
   through `vamtoolbox.threemf.load_mesh_any` (lib3mf → trimesh) in
   `server.py` (`load_stl_for_viewer`, `start_voxelize`) and `VAM_Ob.get_stl_bounds`.
-  Solid meshes import directly; a **beam-lattice-only** 3MF has no triangles and is
-  rejected with a pointer to `voxelize_3mf` (analytic capsule rasterization) —
-  wiring that lattice/insert/zero-dose path into Tomo's single-target pipeline is a
-  follow-up.
+  Solid meshes import directly; **beam-lattice** 3MFs (struts/balls, no triangles)
+  are tessellated at load via `threemf.lattice_to_trimesh` (a cylinder per beam +
+  spheres at joints/balls) so they flow through the same viewer/scale/voxelize path
+  — `voxelizeTargetOpenGL` fills the union correctly (~32% vs 34% analytic). Object
+  roles (insert/zero_dose) are still collapsed into one combined target; a role-aware
+  path is a follow-up.
 - **3MF volumetric export** (`POST /api/export_voxels_3mf`). Writes the 3MF
   **Volumetric** extension (image3d / ImageStack, a PNG stack). Two fields:
   `target` (the binary voxel grid — **lossless** round-trip, so a voxelization can
