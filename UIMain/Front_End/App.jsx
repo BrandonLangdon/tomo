@@ -178,6 +178,7 @@ export default function App() {
   const [slicePct, setSlicePct] = useState(0);
   const [sliceInfo, setSliceInfo] = useState(null);
   const [cudaEnabled, setCudaEnabled] = useState(false);  // CPU sparse projector by default (matches stress tests); CUDA = faster opt-in
+  const [metalEnabled, setMetalEnabled] = useState(true); // Apple Metal projector on by default when present; off = force CPU
 
   // Optimizer features (routed through vamtoolbox.pipeline)
   const [method, setMethod] = useState("OSMO");       // "OSMO" | "BCLP"
@@ -238,12 +239,12 @@ export default function App() {
   useEffect(() => {
     if (voxStatus !== "done") { setEstimate(null); return; }
     let cancelled = false;
-    fetch(`${API}/estimate?n_iter=${nIter}&cuda=${cudaEnabled}&method=${method}`)
+    fetch(`${API}/estimate?n_iter=${nIter}&cuda=${cudaEnabled}&metal=${metalEnabled}&method=${method}`)
       .then(r => r.json())
       .then(d => { if (!cancelled && d.status === "ok") setEstimate(d); })
       .catch(() => {});
     return () => { cancelled = true; };
-  }, [voxStatus, nIter, cudaEnabled, method]);
+  }, [voxStatus, nIter, cudaEnabled, metalEnabled, method]);
 
   // Video playback state
   const [videoStamp, setVideoStamp] = useState(Date.now());
@@ -781,6 +782,7 @@ export default function App() {
       const res = await fetch(`${API}/start_slice`, {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ n_iter: nIter, d_h: dH, d_l: dL, filter: "hamming", cuda: cudaEnabled,
+                               metal: metalEnabled,
                                learning_rate: learningRate, eps: bclpEps, weight: bclpWeight,
                                method, absorption, diffusion: diffusion && method === "BCLP", slab, verbose: verboseOpt,
                                vial_radius_mm: cylinder.radius,
@@ -1034,21 +1036,24 @@ export default function App() {
   // grid comfortably under the ~1.2 B memory cliff.
   const voxSuggest = useMemo(() => {
     const cuda = cudaEnabled && !!hwInfo?.cuda;
+    // A GPU-class optimizer (CUDA or Apple Metal) handles far larger grids before it's
+    // worth suggesting a down-scale.
+    const gpuFast = cuda || (metalEnabled && !!hwInfo?.metal);
     const ramGb = hwInfo?.ram_gb || 16;
     // The voxelize's transient copies use ~20 bytes/voxel; a grid fits if it stays
     // well under available RAM.  Calibrated so ~2.3 B fits on 67 GB (it does), but a
     // 16–32 GB machine is flagged much sooner.  Also factor optimize speed.
     const ramThreshold = ramGb * 0.035e9;
-    const optThreshold = cuda ? 4.0e9 : 0.8e9;
+    const optThreshold = gpuFast ? 4.0e9 : 0.8e9;
     const threshold = Math.min(ramThreshold, optThreshold);
-    const TARGET = Math.min(ramGb * 0.02e9, cuda ? 2.0e9 : 0.5e9);
+    const TARGET = Math.min(ramGb * 0.02e9, gpuFast ? 2.0e9 : 0.5e9);
     if (!autoScaleSuggest || !voxEstimate || voxEstimate.voxels <= threshold) return null;
     const scale = Math.cbrt(TARGET / voxEstimate.voxels);     // linear scale (<1)
     const newPitch = resolution / scale;                      // coarser pitch (mm)
     const newSecs = Math.max(2.0, 1.5 + TARGET / 120e6);   // ~120 M vox/s warmed + GL warm-up
     const ramBound = voxEstimate.voxels > ramThreshold;
     return { scale, newPitch, newVox: TARGET, newSecs, speedup: voxEstimate.secs / newSecs, cuda, ramBound };
-  }, [voxEstimate, resolution, hwInfo, autoScaleSuggest, cudaEnabled]);
+  }, [voxEstimate, resolution, hwInfo, autoScaleSuggest, cudaEnabled, metalEnabled]);
 
   return (
     <div style={{ height: "100vh", background: C.bg, color: C.text, fontFamily: "system-ui,sans-serif", display: "flex", overflow: "hidden", flexDirection: "column", position: "relative" }}>
@@ -1170,11 +1175,17 @@ export default function App() {
               <div style={{ position: "absolute", top: 34, right: 0, width: 290, background: C.bgS, border: `1px solid ${C.border}`, borderRadius: 7, padding: 12, boxShadow: "0 10px 28px rgba(0,0,0,0.55)", zIndex: 40, WebkitAppRegion: "no-drag", maxHeight: "78vh", overflowY: "auto" }}>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#fff", marginBottom: 10, textTransform: "uppercase", letterSpacing: ".05em" }}>Settings</div>
 
-                <div style={{ display: "flex", alignItems: "center", gap: 6, borderBottom: `1px solid ${C.border}`, paddingBottom: 10, marginBottom: 10 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Toggle value={cudaEnabled && !!hwInfo?.cuda} onChange={setCudaEnabled} disabled={!hwInfo?.cuda} hint={!hwInfo?.cuda ? "(no GPU)" : ""} label="Use GPU (CUDA)" />
                   <span style={{ marginLeft: "auto" }}><InfoBtn open={infoOpen === "s_gpu"} onClick={infoTog("s_gpu")} /></span>
                 </div>
-                {infoOpen === "s_gpu" && <div style={infoPop}>{hwInfo ? (hwInfo.cuda ? `${hwInfo.gpu || "CUDA GPU"} — on by default (much faster). Turn off to force the CPU projector.` : "CPU-only machine — the GPU projector is unavailable.") : "Detecting GPU…"}</div>}
+                {infoOpen === "s_gpu" && <div style={infoPop}>{hwInfo ? (hwInfo.cuda ? `${hwInfo.gpu || "CUDA GPU"} — on by default (much faster). Turn off to force the CPU projector.` : "No NVIDIA/CUDA GPU on this machine.") : "Detecting GPU…"}</div>}
+
+                <div style={{ display: "flex", alignItems: "center", gap: 6, borderBottom: `1px solid ${C.border}`, paddingBottom: 10, marginBottom: 10, marginTop: 8 }}>
+                  <Toggle value={metalEnabled && !!hwInfo?.metal} onChange={setMetalEnabled} disabled={!hwInfo?.metal} hint={!hwInfo?.metal ? "(no Metal)" : ""} label="Use GPU (Metal)" />
+                  <span style={{ marginLeft: "auto" }}><InfoBtn open={infoOpen === "s_metal"} onClick={infoTog("s_metal")} /></span>
+                </div>
+                {infoOpen === "s_metal" && <div style={infoPop}>{hwInfo ? (hwInfo.metal ? `${hwInfo.gpu || "Apple Metal GPU"} — on by default on Apple Silicon (~10× the CPU projector). Turn off to force the CPU projector.` : "No Apple Metal device on this machine.") : "Detecting GPU…"}</div>}
 
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Toggle value={verboseOpt} onChange={setVerboseOpt} label="Verbose optimization output" />
@@ -1187,7 +1198,7 @@ export default function App() {
                     <Toggle value={autoScaleSuggest} onChange={setAutoScaleSuggest} label="Auto-scale suggestions" />
                     <span style={{ marginLeft: "auto" }}><InfoBtn open={infoOpen === "s_auto"} onClick={infoTog("s_auto")} /></span>
                   </div>
-                  {infoOpen === "s_auto" && <div style={infoPop}>Suggest a coarser resolution when a part would be slow. {hwInfo ? (hwInfo.cuda ? `${hwInfo.gpu || "CUDA GPU"} detected — only very large grids are flagged.` : "CPU-only — flagged sooner, since the optimize is much slower.") : ""}</div>}
+                  {infoOpen === "s_auto" && <div style={infoPop}>Suggest a coarser resolution when a part would be slow. {hwInfo ? ((hwInfo.cuda || hwInfo.metal) ? `${hwInfo.gpu || "GPU"} detected — only very large grids are flagged.` : "CPU-only — flagged sooner, since the optimize is much slower.") : ""}</div>}
                   <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 10, borderTop: `1px solid ${C.border}`, paddingTop: 10 }}>
                     <Toggle value={saveSinogram} onChange={setSaveSinogram} label="Also save reloadable project (.tomo)" />
                     <span style={{ marginLeft: "auto" }}><InfoBtn open={infoOpen === "s_tomo"} onClick={infoTog("s_tomo")} /></span>
@@ -1224,7 +1235,11 @@ export default function App() {
                 </div>
 
                 <div style={{ borderTop: `1px solid ${C.border}`, marginTop: 10, paddingTop: 8, fontSize: 11, color: C.muted, lineHeight: 1.5 }}>
-                  {hwInfo && <div style={{ marginBottom: 6 }}>Machine: <span style={{ color: C.text }}>{hwInfo.cuda ? (hwInfo.gpu || "CUDA GPU") : "CPU only"} · {hwInfo.cpu_cores} cores · {hwInfo.ram_gb} GB</span></div>}
+                  {hwInfo && <div style={{ marginBottom: 6 }}>Machine: <span style={{ color: C.text }}>{
+                    hwInfo.cuda ? `${hwInfo.gpu || "CUDA GPU"}${hwInfo.vram_gb ? ` · ${hwInfo.vram_gb} GB` : ""}`
+                    : hwInfo.metal ? `${hwInfo.gpu || "Apple Metal (GPU)"}${metalEnabled ? "" : " (off)"}${hwInfo.vram_gb ? ` · ${hwInfo.vram_gb} GB` : ""}`
+                    : "CPU only"
+                  } · {hwInfo.cpu_cores} cores · {hwInfo.ram_gb} GB</span></div>}
                   Debug logs → <span style={{ color: C.text, fontFamily: "monospace" }}>logs/</span> (last 3 kept) · optimize data accumulates in <span style={{ color: C.text, fontFamily: "monospace" }}>optimize_times.csv</span>
                 </div>
               </div>

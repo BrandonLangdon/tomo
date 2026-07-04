@@ -18,6 +18,7 @@ class VAM:
         self.sino  = None
 
         self.cuda   = False
+        self.use_metal = True   # Apple Metal GPU projector (auto on Apple Silicon); False -> CPU
         self.res    = 1.0
         self.n_iter = 5
         self.d_h    = 0.6
@@ -258,6 +259,7 @@ class VAM:
             print_time_s=self.print_time_s,
             rotation_deg_s=self.rotation_deg_s,
             use_cuda=bool(self.cuda),
+            use_metal=bool(self.use_metal),
             slab=str(self.slab),
             low_memory=self.low_memory,
             verbose=bool(getattr(self, "verbose", False)),

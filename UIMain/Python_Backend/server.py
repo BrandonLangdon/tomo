@@ -368,20 +368,23 @@ def hardware():
         info = _hw.detect_system()
         gpus = info.get("gpus", []) or []
         metal = bool(info.get("metal"))
+        metal_dev = info.get("metal_device")     # e.g. "Apple M1"
+        metal_mem = info.get("metal_mem_gb")
         # Report the accelerator actually in use: a CUDA GPU, else Apple Metal
         # (the projectorconstructor auto-selects Metal on Apple Silicon), else CPU.
         if gpus:
             gpu_name = gpus[0]["name"]
         elif metal:
-            gpu_name = "Apple Metal (GPU)"
+            gpu_name = f"{metal_dev} (Metal)" if metal_dev else "Apple Metal (GPU)"
         else:
             gpu_name = None
         return jsonify({
             "status": "ok",
             "cuda": bool(info.get("cuda")),
             "metal": metal,
+            "metal_device": metal_dev,
             "gpu": gpu_name,
-            "vram_gb": (gpus[0].get("vram_total_gb") if gpus else None),
+            "vram_gb": (gpus[0].get("vram_total_gb") if gpus else metal_mem),
             "cpu_cores": info.get("cpu_logical"),
             "ram_gb": info.get("ram_total_gb"),
         })
@@ -815,22 +818,44 @@ def _gpu_speed_factor():
     return f
 
 
+# Apple Metal is GPU-class but slower than the RTX 4070 the "gpu" estimate is tuned
+# on — this multiplier keeps the Metal ETA from using the (much slower) CPU model.
+# Coarse; refine from optimize_times.csv as Metal data accumulates.
+_METAL_FACTOR = 3.0
+
+_METAL_AVAIL = None
+def _metal_available():
+    """Whether an Apple Metal device is present (cached)."""
+    global _METAL_AVAIL
+    if _METAL_AVAIL is None:
+        try:
+            import vamtoolbox.util.hardware as _hw
+            _METAL_AVAIL = bool(_hw.detect_system().get("metal"))
+        except Exception:
+            _METAL_AVAIL = False
+    return _METAL_AVAIL
+
+
 @app.get("/api/estimate")
 def estimate():
     """Estimated optimize time for the current voxel grid (drives the ETA shown
-    before optimizing).  Query: n_iter, cuda, method."""
+    before optimizing).  Query: n_iter, cuda, metal, method."""
     if vam.t_geo is None:
         return jsonify({"status": "error", "message": "No voxel data"}), 400
     try:
         n_iter = int(request.args.get("n_iter", vam.n_iter))
         cuda = str(request.args.get("cuda", "false")).lower() in ("1", "true", "yes")
+        metal = (str(request.args.get("metal", "true")).lower() in ("1", "true", "yes")
+                 and not cuda and _metal_available())
         method = str(request.args.get("method", "OSMO")).upper()
         voxels = int(vam.t_geo.array.size)
         est = vamtoolbox.util.timing.estimateOptimizeTime(
-            voxels, n_iter, "gpu" if cuda else "sparse", 360)
+            voxels, n_iter, "gpu" if (cuda or metal) else "sparse", 360)
         secs = float(est["total_s"]) * (1.5 if method == "BCLP" else 1.0)
         if cuda:
             secs *= _gpu_speed_factor()      # adjust the generic GPU rate for this card
+        elif metal:
+            secs *= _METAL_FACTOR            # Metal is GPU-class but slower than the baseline
         try:
             pretty = vamtoolbox.util.timing.formatDuration(secs)
         except Exception:
@@ -863,6 +888,7 @@ def start_slice():
     vam.weight = float(data.get("weight", 1.0))                   # BCLP Lp weight
     vam.filt = str(data.get("filter", "hamming"))
     vam.cuda = bool(data.get("cuda", False))
+    vam.use_metal = bool(data.get("metal", True))    # Apple Metal projector; False forces CPU
     vam.method = str(data.get("method", "OSMO")).upper()
     vam.absorption = bool(data.get("absorption", False))
     vam.diffusion = bool(data.get("diffusion", False))
@@ -899,9 +925,10 @@ def start_slice():
     try:
         import vamtoolbox.util.timing as _tim
         voxels = int(vam.t_geo.array.size)
-        backend = "gpu" if vam.cuda else "sparse"
+        _metal_active = (not vam.cuda) and bool(vam.use_metal) and _metal_available()
+        backend = "gpu" if (vam.cuda or _metal_active) else "sparse"
         _est = _tim.estimateOptimizeTime(voxels, vam.n_iter, backend, 360)
-        _gpu_f = _gpu_speed_factor() if vam.cuda else 1.0
+        _gpu_f = _gpu_speed_factor() if vam.cuda else (_METAL_FACTOR if _metal_active else 1.0)
         slice_estimate_s = max(5.0, float(_est["total_s"]) * (1.5 if vam.method == "BCLP" else 1.0) * _gpu_f)
     except Exception:
         slice_estimate_s = max(10.0, vam.n_iter * 30.0)
