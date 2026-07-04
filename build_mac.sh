@@ -31,8 +31,12 @@ fi
 PY="$REPO/build/python/bin/python3"
 
 echo "==> [2/4] install backend deps + OUR vamtoolbox (Metal) into the runtime"
-# A prior build's slim step (step 3) strips pip/setuptools from build/python; step 1
-# skips re-extraction when the dir already exists, so restore pip before using it.
+# A prior build's slim step (step 3) strips site-packages/pip but LEAVES pip-*.dist-info,
+# so `ensurepip` reports "already satisfied" and won't restore the missing module. Purge
+# the stale pip/setuptools metadata first, THEN ensurepip installs a working pip. (Step 1
+# skips re-extraction when build/python already exists, so this self-heals cached runtimes.)
+SP="$REPO/build/python/lib/python${PY_VER%.*}/site-packages"
+rm -rf "$SP"/pip "$SP"/pip-*.dist-info "$SP"/setuptools "$SP"/setuptools-*.dist-info 2>/dev/null || true
 "$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$PY" -m pip install -q --upgrade pip
 # --force-reinstall --no-deps: copy the CURRENT VAMToolbox source into the bundle
