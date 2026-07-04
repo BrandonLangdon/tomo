@@ -31,8 +31,18 @@ fi
 PY="$REPO/build/python/bin/python3"
 
 echo "==> [2/4] install backend deps + OUR vamtoolbox (Metal) into the runtime"
+# A prior build's slim step (step 3) strips site-packages/pip but LEAVES pip-*.dist-info,
+# so `ensurepip` reports "already satisfied" and won't restore the missing module. Purge
+# the stale pip/setuptools metadata first, THEN ensurepip installs a working pip. (Step 1
+# skips re-extraction when build/python already exists, so this self-heals cached runtimes.)
+SP="$REPO/build/python/lib/python${PY_VER%.*}/site-packages"
+rm -rf "$SP"/pip "$SP"/pip-*.dist-info "$SP"/setuptools "$SP"/setuptools-*.dist-info 2>/dev/null || true
+"$PY" -m ensurepip --upgrade >/dev/null 2>&1 || true
 "$PY" -m pip install -q --upgrade pip
-"$PY" -m pip install -q "$VAMTOOLBOX"           # non-editable -> copies Metal source in
+# --force-reinstall --no-deps: copy the CURRENT VAMToolbox source into the bundle
+# every build even when the version hasn't bumped (pip would otherwise say "already
+# satisfied" and ship a stale copy — e.g. missing threemf.load_mesh_any).
+"$PY" -m pip install -q --force-reinstall --no-deps "$VAMTOOLBOX"   # copies Metal source in
 "$PY" -m pip install -q flask flask-cors opencv-python psutil joblib imageio-ffmpeg \
     "metalcompute==0.2.9" dill matplotlib pyglet trimesh scikit-image Pillow numpy-stl \
     PyOpenGL lib3mf pyvista tqdm vedo scipy

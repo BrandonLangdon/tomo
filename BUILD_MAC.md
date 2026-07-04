@@ -21,6 +21,31 @@ Metal). A packaged `.dmg` is not done yet — see "Remaining" below.
   `subprocess.CREATE_NO_WINDOW` uses (a Windows-only flag) with `getattr(..., 0)`,
   and made the voxelize cancel tree-kill cross-platform (psutil on macOS/Linux).
 
+## Features added on `feature/3mf-and-benchmarks`
+
+Branched off `mac-support`. All three lean on our Metal-capable VAMToolbox fork.
+
+- **3MF import.** `.3mf` files load anywhere an STL does (Add-model dialog,
+  drag-and-drop). The bundled trimesh can't read 3MF, so mesh load now routes
+  through `vamtoolbox.threemf.load_mesh_any` (lib3mf → trimesh) in
+  `server.py` (`load_stl_for_viewer`, `start_voxelize`) and `VAM_Ob.get_stl_bounds`.
+  Solid meshes import directly; **beam-lattice** 3MFs (struts/balls, no triangles)
+  are tessellated at load via `threemf.lattice_to_trimesh` (a cylinder per beam +
+  spheres at joints/balls) so they flow through the same viewer/scale/voxelize path
+  — `voxelizeTargetOpenGL` fills the union correctly (~32% vs 34% analytic). Object
+  roles (insert/zero_dose) are still collapsed into one combined target; a role-aware
+  path is a follow-up.
+- **3MF volumetric export** (`POST /api/export_voxels_3mf`). Writes the 3MF
+  **Volumetric** extension (image3d / ImageStack, a PNG stack). Two fields:
+  `target` (the binary voxel grid — **lossless** round-trip, so a voxelization can
+  be shared/reloaded without re-voxelizing) and `dose` (the optimized dose field,
+  for inspection in a volumetric viewer). UI: **⤓ Export target → 3MF** on the
+  Voxelize step; **⤓ Dose → 3MF** in the Print-Output header. Spacing = `vam.res`
+  mm/voxel.
+- **Optimize benchmark** — `benchmarks/optimize_bench.py` times the same pipeline
+  the app runs on Metal vs pure-CPU. See `benchmarks/README.md`; on this hardware
+  Metal is ~11–16× the CPU path with identical loss.
+
 ## One-time setup
 
 Requires **Node 20+** (upstream repo predates it; system Node may be old):
@@ -110,6 +135,16 @@ For distribution without the prompt you'd need an Apple Developer ID signature +
 notarization.
 
 ## Known issues / to test
+
+- **[FIXED 2026-07-03] Reopen-after-close hung on the startup screen.** Closing
+  the window with the red **X** left the app running in the Dock (correct macOS
+  behavior) but `window-all-closed` had *killed the Python backend*; clicking the
+  Dock icon re-created the window, whose fresh startup screen then polled a dead
+  backend forever. Fix in `electron/main.cjs`: on macOS keep the backend alive
+  across window-close (freed on real quit via `before-quit`), and `activate`
+  now calls `ensureBackend()` before/with re-creating the window as a safety net.
+  *(This may also have been the "resize during launch" hang below — same symptom,
+  a backend the UI never reaches — so retest that after this fix.)*
 
 - **Resizing the window during launch can hang it on the loading screen**
   (observed 2026-07-03, macOS packaged build). Repro: start the app and drag-
